@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colmap-rgbd-gt"
+version = "0.1.0"
+description = "Docker-based pipeline for converting rosbag recordings to metric pseudo-ground-truth trajectories"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+authors = [
+    {name = "COLMAP RGBD GT Contributors"}
+]
+keywords = ["colmap", "rosbag", "slam", "trajectory", "ground-truth", "depth", "rgbd"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+dependencies = [
+    "rosbags>=0.9.20",
+    "rosbags-image",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+    "rich>=13.0",
+    "typer>=0.9",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.8",
+    "ruff>=0.1.0",
+    "black>=24.0",
+    "isort>=5.13",
+]
+
+[project.scripts]
+gttool = "colmap_rgbd_gt.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/colmap-rgbd-gt"
+Documentation = "https://github.com/your-org/colmap-rgbd-gt#readme"
+Repository = "https://github.com/your-org/colmap-rgbd-gt"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

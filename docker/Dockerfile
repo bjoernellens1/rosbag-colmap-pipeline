@@ -1,0 +1,42 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    git \
+    cmake \
+    build-essential \
+    libeigen3-dev \
+    libopencv-dev \
+    libsqlite3-dev \
+    libboost-all-dev \
+    libceres-dev \
+    libgflags-dev \
+    libgoogle-glog-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+RUN uv pip install --system --upgrade pip setuptools wheel
+
+RUN apt-get update && apt-get install -y colmap && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements/base.txt /app/requirements/
+RUN uv pip install --system -r requirements/base.txt
+
+COPY pyproject.toml /app/
+COPY src/ /app/src/
+RUN uv pip install --system -e .
+
+ENTRYPOINT ["gttool"]
+CMD ["--help"]

@@ -1,0 +1,21 @@
+services:
+  gttool:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../data:/app/data:ro
+      - ./workspaces:/app/workspaces
+    command: ["--help"]
+
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ..:/app:rw
+      - ./workspaces:/app/workspaces
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    entrypoint: ["/bin/bash"]

@@ -1,0 +1,43 @@
+bag:
+  path: ""
+  storage_id: auto
+
+topics:
+  rgb: /camera/color/image_raw
+  rgb_compressed: /camera/color/image_raw/compressed
+  depth: /camera/aligned_depth_to_color/image_raw
+  pointcloud: null
+  camera_info: /camera/color/camera_info
+
+sync:
+  max_rgb_depth_dt_sec: 0.02
+  max_rgb_info_dt_sec: 0.05
+
+images:
+  export_format: png
+  min_frame_stride: 1
+  max_frames: null
+
+depth:
+  unit_scale_to_meters: 0.001
+  min_depth_m: 0.1
+  max_depth_m: 6.0
+  sample_stride: 8
+
+colmap:
+  camera_model: OPENCV
+  single_camera: true
+  matcher: sequential
+  use_gpu: false
+  mapper_preset: medium
+
+scaling:
+  method: umeyama
+  max_frames_for_scale: 100
+  min_points_per_frame: 200
+  outlier_rejection: ransac
+
+export:
+  tum: true
+  csv: true
+  json_report: true

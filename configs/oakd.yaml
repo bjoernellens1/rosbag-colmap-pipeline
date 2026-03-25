@@ -1,0 +1,43 @@
+bag:
+  path: ""
+  storage_id: auto
+
+topics:
+  rgb: /stereo/left/image_rect_color
+  rgb_compressed: /stereo/left/image_rect_color/compressed
+  depth: /stereo/depth/image_raw
+  pointcloud: /stereo/points
+  camera_info: /stereo/left/camera_info
+
+sync:
+  max_rgb_depth_dt_sec: 0.02
+  max_rgb_info_dt_sec: 0.05
+
+images:
+  export_format: png
+  min_frame_stride: 1
+  max_frames: null
+
+depth:
+  unit_scale_to_meters: 0.001
+  min_depth_m: 0.2
+  max_depth_m: 8.0
+  sample_stride: 8
+
+colmap:
+  camera_model: OPENCV
+  single_camera: true
+  matcher: sequential
+  use_gpu: false
+  mapper_preset: medium
+
+scaling:
+  method: umeyama
+  max_frames_for_scale: 100
+  min_points_per_frame: 200
+  outlier_rejection: ransac
+
+export:
+  tum: true
+  csv: true
+  json_report: true

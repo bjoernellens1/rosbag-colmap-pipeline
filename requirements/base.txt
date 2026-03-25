@@ -1,0 +1,9 @@
+rosbags>=0.9.20
+rosbags-image
+numpy>=1.26
+opencv-python-headless>=4.9
+pyyaml>=6.0
+scipy>=1.11
+rich>=13.0
+typer>=0.9
+pillow>=10.0

@@ -1,0 +1,6 @@
+-r base.txt
+# ROCm 7.2 PyTorch support (optional, for GPU-accelerated Python operations)
+# Install PyTorch with ROCm 7.2 support:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+# Note: ROCm 7.2 containers ship with compatible PyTorch builds
+# The core pipeline runs COLMAP CPU-only; ROCm is for optional Python-side acceleration
