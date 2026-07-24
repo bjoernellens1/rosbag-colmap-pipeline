@@ -33,6 +33,7 @@ dependencies = [
     "rich>=13.0",
     "typer>=0.9",
     "pillow>=10.0",
+    "evo>=1.28,<2",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,108 @@
+bag:
+  path: ""
+  storage_id: auto
+
+topics:
+  rgb: null
+  rgb_compressed: null
+  depth: null
+  pointcloud: null
+  camera_info: null
+
+sync:
+  max_rgb_depth_dt_sec: 0.03
+  max_rgb_info_dt_sec: 0.1
+
+images:
+  export_format: png
+  # Fixed stride assumes constant motion speed across the whole bag; real
+  # motion speed varies (turns, stops, fast segments), so a stride tuned
+  # for the average case is too sparse exactly where it matters most --
+  # during fast motion, causing lost overlap and split reconstructions.
+  # Motion-adaptive keyframe selection instead keeps a frame whenever ORB
+  # feature-overlap with the last keyframe drops below min_match_ratio:
+  # dense during fast motion, sparse when nearly stationary, with
+  # max_frame_gap as a hard fallback so a textureless stretch with no
+  # reliable matches still makes forward progress.
+  keyframe_selection:
+    enabled: true
+    # 0.75 was tried and produced 4671/5270 keyframes (89% -- essentially
+    # no reduction, impractically slow COLMAP runs) for negligible extra
+    # coverage. Density isn't the right lever for reconnecting a sequence
+    # that's genuinely lost overlap; reverted to 0.5 (validated: 267/267 =
+    # 100% coverage on floor2) and rely on matcher-side reconnection
+    # (sequential_overlap, quadratic_overlap, loop_detection below)
+    # instead for harder sequences like floor3.
+    min_match_ratio: 0.5
+    max_frame_gap: 30
+    orb_features: 500
+  min_frame_stride: 1
+  max_frames: null
+
+depth:
+  unit_scale_to_meters: 0.001
+  min_depth_m: 0.2
+  max_depth_m: 8.0
+  sample_stride: 8
+
+colmap:
+  camera_model: OPENCV
+  single_camera: true
+  matcher: sequential
+  use_gpu: false
+  mapper_preset: medium
+  # Default overlap (10) only matches each image against its next 10
+  # neighbors in sequence -- widened so a single degraded-overlap stretch
+  # has more chances to be bridged without needing even denser keyframes.
+  sequential_overlap: 20
+  # Exponential-spaced matching window (in addition to the linear
+  # `overlap` window above) -- near-zero extra cost, strictly more
+  # coverage. COLMAP FAQ-recommended alongside `overlap` for video-like
+  # sequences.
+  quadratic_overlap: true
+  # Re-match each frame against visually-similar past frames (not just
+  # temporally-adjacent ones) -- COLMAP's own documented mechanism for
+  # reconnecting a sequence that's split into disconnected sub-models.
+  # Requires the vocab tree baked into the Docker image (docker/Dockerfile).
+  loop_detection: true
+  vocab_tree_path: /opt/colmap_vocab_tree/vocab_tree_flickr100K_words32K.bin
+  # The incremental mapper only runs periodic global BA during
+  # registration -- loop-closure matches found late in the sequence (via
+  # vocab-tree loop detection above) may not get fully propagated by the
+  # time mapping stops, leaving a fully-connected-but-still-drifted
+  # trajectory (all frames registered, but a physically closed loop not
+  # visually closing). An explicit final global BA pass with a generous
+  # iteration budget lets verified loop-closure constraints actually pull
+  # accumulated drift back together.
+  run_bundle_adjustment: true
+  bundle_adjustment_max_iterations: 100
+
+scaling:
+  method: umeyama
+  # With the denser stride the trajectory now has 3x more registered
+  # frames; raise this so scale estimation samples across the whole
+  # sequence rather than just its first ~third.
+  max_frames_for_scale: 300
+  min_points_per_frame: 200
+  outlier_rejection: ransac
+  robust_statistic: median
+  # COLMAP's reconstruction scale is arbitrary and can differ from metric
+  # by far more than the code's 10% default -- this bag's true scale error
+  # is ~65%. depth_tolerance must exceed that to admit any correspondences
+  # at all (see scaling/correspondences.py's find_valid_correspondences
+  # docstring); set generously loose here so the robust estimators
+  # (median/umeyama/RANSAC) have candidates to narrow down from.
+  depth_tolerance: 2.0
+
+depth_ba:
+  enabled: false
+  depth_tolerance: 0.1
+  obs_sigma_base: 0.01
+  obs_sigma_quadratic: 0.0
+  max_iterations: 50
+  max_frames_for_ba: 100
+
+export:
+  tum: true
+  csv: true
+  json_report: true

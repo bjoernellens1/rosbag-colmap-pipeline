@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import shutil
 import numpy as np
 
 
@@ -20,12 +21,23 @@ def synchronize_rgb_depth(
     depth_times: list[tuple[int, str]],
     max_dt_ns: int = 33_000_000,
 ) -> list[Association]:
+    """Associate each RGB frame with its nearest-in-time depth frame.
+
+    `Association.frame_id` is parsed from the RGB filename (the original
+    extraction-time frame index, e.g. "000615.png" -> 615) rather than
+    taken from this loop's position -- RGB export can skip frames
+    (`images.min_frame_stride`), so the position in `rgb_times` diverges
+    from the embedded frame index whenever stride > 1. Callers (COLMAP
+    image naming, `Workspace.get_depth_path`, `align_depth_to_rgb_frames`)
+    all key by the embedded frame index, so this must match.
+    """
     rgb_ts = np.array([t[0] for t in rgb_times], dtype=np.int64)
     depth_ts = np.array([t[0] for t in depth_times], dtype=np.int64)
 
     associations = []
 
-    for frame_id, (rgb_time, rgb_name) in enumerate(rgb_times):
+    for rgb_time, rgb_name in rgb_times:
+        frame_id = int(Path(rgb_name).stem)
         deltas = np.abs(depth_ts - rgb_time)
         min_idx = np.argmin(deltas)
         min_delta = deltas[min_idx]
@@ -71,6 +83,51 @@ def associate_camera_info(
             associations.append(None)
 
     return associations
+
+
+def align_depth_to_rgb_frames(
+    depth_dir: Path,
+    depth_data: list[tuple[int, str]],
+    associations: list[Association],
+) -> None:
+    """Re-key depth PNG files by RGB `frame_id`.
+
+    RGB and depth come from separate topics with independent, generally
+    non-identical frame counts/rates (e.g. a 2314-message RGB stream and a
+    3045-message depth stream over the same bag). `export_depth_frames`
+    numbers depth files by its own independent per-message counter, but
+    downstream consumers (`Workspace.get_depth_path`, used by
+    `estimate_global_scale` and the depth-BA pipeline) look up depth by the
+    COLMAP/RGB `frame_id`. Without this re-keying step, that lookup would
+    silently read whichever depth frame happens to share the same index as
+    an RGB frame -- not the depth frame actually closest in time to it.
+
+    After this runs, `depth_dir/{frame_id:06d}.png` is the depth frame
+    time-matched (per `synchronize_rgb_depth`) to RGB frame `frame_id`;
+    depth frames from the original independent numbering that don't
+    survive re-keying (no matching RGB frame within tolerance) are removed.
+    """
+    depth_by_ts = {ts: fname for ts, fname in depth_data}
+
+    staged_paths = []
+    for assoc in associations:
+        if assoc.depth_timestamp_ns is None:
+            continue
+        src_name = depth_by_ts.get(assoc.depth_timestamp_ns)
+        if src_name is None:
+            continue
+        src = depth_dir / src_name
+        if not src.exists():
+            continue
+        staged = depth_dir / f"{assoc.frame_id:06d}.png.aligned"
+        shutil.copyfile(src, staged)
+        staged_paths.append(staged)
+
+    for f in depth_dir.glob("*.png"):
+        f.unlink()
+
+    for f in staged_paths:
+        f.rename(f.with_suffix(""))
 
 
 def export_associations_csv(associations: list[Association], path: Path) -> None:

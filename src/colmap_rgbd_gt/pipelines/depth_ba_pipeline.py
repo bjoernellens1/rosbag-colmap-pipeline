@@ -15,6 +15,7 @@ from colmap_rgbd_gt.colmap.pose_extract import extract_trajectory, scale_traject
 from colmap_rgbd_gt.colmap.colmap_io import write_cameras_text, write_images_text, write_points3d_text
 from colmap_rgbd_gt.scaling.scale_estimation import estimate_global_scale
 from colmap_rgbd_gt.export.tum import export_trajectory_tum
+from colmap_rgbd_gt.export.evo import plot_trajectory
 from colmap_rgbd_gt.utils.camera import CameraIntrinsics
 
 logger = get_logger(__name__)
@@ -141,7 +142,19 @@ def depth_ba_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     write_points3d_text(refined_dir / "points3D.txt", refined_model["points3d"])
 
     ba_trajectory = result.to_tum_trajectory()
-    export_trajectory_tum(ba_trajectory, ws.layout.outputs / "trajectory_depth_ba_tum.txt")
+    ba_tum_path = ws.layout.outputs / "trajectory_depth_ba_tum.txt"
+    export_trajectory_tum(ba_trajectory, ba_tum_path)
+
+    try:
+        metric_tum_path = ws.layout.outputs / "trajectory_metric_tum.txt"
+        plot_trajectory(
+            ba_tum_path,
+            ws.layout.outputs / "trajectory_depth_ba_plot.png",
+            title="Depth-BA vs scale-only trajectory (top-down XY)",
+            reference_tum_path=metric_tum_path if metric_tum_path.exists() else None,
+        )
+    except Exception as e:
+        logger.warning(f"Could not plot depth-BA trajectory: {e}")
 
     report = {
         "converged": result.converged,

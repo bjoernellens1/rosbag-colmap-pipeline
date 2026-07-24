@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     libceres-dev \
     libgflags-dev \
     libgoogle-glog-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # --system-site-packages so this project's venv can still see the base
@@ -38,6 +39,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv pip install --upgrade pip setuptools wheel
 
 RUN apt-get update && apt-get install -y colmap && rm -rf /var/lib/apt/lists/*
+
+# Pretrained vocab tree for COLMAP's sequential-matcher loop detection --
+# reconnects frames whose overlap with their immediate temporal neighbors
+# has dropped (fast motion, low-texture stretches) by re-matching against
+# visually-similar past frames, not just a linear window. Baked in at
+# build time so no runtime network access is needed. 32K-word tree: sized
+# for hundreds-to-low-thousands of images, matching this pipeline's scale.
+RUN mkdir -p /opt/colmap_vocab_tree && \
+    curl -fsSL -o /opt/colmap_vocab_tree/vocab_tree_flickr100K_words32K.bin \
+    https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_flickr100K_words32K.bin
 
 WORKDIR /app
 

@@ -8,6 +8,7 @@ from colmap_rgbd_gt.scaling.scale_estimation import estimate_global_scale
 from colmap_rgbd_gt.scaling.diagnostics import compute_diagnostics, plot_scale_histogram, export_scale_report
 from colmap_rgbd_gt.colmap.pose_extract import extract_trajectory, scale_trajectory
 from colmap_rgbd_gt.export.tum import export_trajectory_tum
+from colmap_rgbd_gt.export.evo import plot_trajectory
 from colmap_rgbd_gt.export.report import generate_report, save_report
 from colmap_rgbd_gt.dataset.schema import Workspace
 
@@ -53,7 +54,17 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
 
     metric_trajectory = scale_trajectory(trajectory, scale_estimate.scale)
 
-    export_trajectory_tum(metric_trajectory, ws.layout.outputs / "trajectory_metric_tum.txt")
+    metric_tum_path = ws.layout.outputs / "trajectory_metric_tum.txt"
+    export_trajectory_tum(metric_trajectory, metric_tum_path)
+
+    try:
+        plot_trajectory(
+            metric_tum_path,
+            ws.layout.outputs / "trajectory_plot.png",
+            title="Metric trajectory (top-down XY)",
+        )
+    except Exception as e:
+        logger.warning(f"Could not plot trajectory: {e}")
 
     try:
         report = generate_report(workspace, scale_estimate, diagnostics)

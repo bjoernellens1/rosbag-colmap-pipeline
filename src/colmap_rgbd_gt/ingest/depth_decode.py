@@ -3,12 +3,44 @@
 import numpy as np
 from typing import Any
 
+from colmap_rgbd_gt.preprocessing import decompress_image_bytes, parse_compressed_format
 from colmap_rgbd_gt.logging import get_logger
 
 logger = get_logger(__name__)
 
 
+def decode_compressed_depth_image(msg: Any, scale: float = 0.001) -> np.ndarray:
+    """Decode a `sensor_msgs/CompressedImage` depth message.
+
+    Unlike RGB compressed transport, ROS depth compression has no single
+    standard: some drivers wrap the payload in `image_transport`'s
+    compressedDepth 12-byte quantization header, others (as observed here)
+    publish a plain PNG of the raw encoding with a `format` string like
+    `"16UC1; png compressed "`. This handles the plain-PNG case -- the
+    payload is decoded via `preprocessing.decompress_image_bytes`
+    (bit-depth-preserving), with the parsed `format` string used only to
+    decide whether the decoded array is already metric (32FC1) or needs
+    the mm->m `scale` applied (16UC1 and unrecognized formats).
+    """
+    parsed = parse_compressed_format(msg.format)
+    img = decompress_image_bytes(bytes(msg.data))
+
+    if parsed["encoding"] == "32fc1":
+        return img.astype(np.float64)
+
+    if parsed["encoding"] not in ("16uc1", "mono16"):
+        logger.warning(
+            f"Unrecognized compressed depth format '{msg.format}', assuming "
+            f"16-bit with scale={scale}"
+        )
+
+    return img.astype(np.float64) * scale
+
+
 def decode_depth_image(msg: Any, scale: float = 0.001) -> np.ndarray:
+    if hasattr(msg, "format"):
+        return decode_compressed_depth_image(msg, scale=scale)
+
     encoding = msg.encoding.lower()
     height = msg.height
     width = msg.width

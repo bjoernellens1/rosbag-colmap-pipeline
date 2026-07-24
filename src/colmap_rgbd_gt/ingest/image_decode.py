@@ -4,6 +4,8 @@ import numpy as np
 from typing import Any
 import cv2
 
+from colmap_rgbd_gt.preprocessing import decompress_image_bytes
+
 
 def decode_rgb_image(msg: Any) -> np.ndarray:
     encoding = msg.encoding.lower()
@@ -45,23 +47,7 @@ def decode_rgb_image(msg: Any) -> np.ndarray:
 
 
 def decode_compressed_image(msg: Any) -> np.ndarray:
-    data = bytes(msg.data)
-    fmt = msg.format.lower() if hasattr(msg, "format") else "jpeg"
-
-    if "jpeg" in fmt or "jpg" in fmt:
-        img_array = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        return img
-    elif "png" in fmt:
-        img_array = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        return img
-    else:
-        img_array = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        if img is not None:
-            return img
-        raise ValueError(f"Unsupported compressed format: {fmt}")
+    return decompress_image_bytes(bytes(msg.data), imread_flag=cv2.IMREAD_COLOR)
 
 
 def decode_image(msg: Any) -> np.ndarray:

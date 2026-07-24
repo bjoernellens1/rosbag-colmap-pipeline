@@ -9,6 +9,7 @@ from colmap_rgbd_gt.ingest.bag_reader import BagReader
 from colmap_rgbd_gt.ingest.image_decode import decode_image
 from colmap_rgbd_gt.ingest.depth_decode import decode_depth_image, filter_depth_range, depth_to_uint16
 from colmap_rgbd_gt.ingest.camera_info import extract_camera_info
+from colmap_rgbd_gt.ingest.keyframe_selection import KeyframeSelector
 from colmap_rgbd_gt.utils.io import ensure_dir, save_json
 from colmap_rgbd_gt.utils.time import ros_time_to_nanoseconds
 from colmap_rgbd_gt.logging import get_logger
@@ -24,22 +25,41 @@ def export_rgb_frames(
 ) -> list[tuple[int, str]]:
     output_dir = ensure_dir(output_dir)
     max_frames = config.get("max_frames")
-    stride = config.get("min_frame_stride", 1)
     fmt = config.get("export_format", "png")
+
+    keyframe_config = config.get("keyframe_selection", {})
+    use_keyframes = keyframe_config.get("enabled", False)
+    selector = (
+        KeyframeSelector(
+            min_match_ratio=keyframe_config.get("min_match_ratio", 0.5),
+            max_frame_gap=keyframe_config.get("max_frame_gap", 30),
+            orb_features=keyframe_config.get("orb_features", 500),
+        )
+        if use_keyframes
+        else None
+    )
+    stride = config.get("min_frame_stride", 1)
 
     timestamps_paths = []
     frame_idx = 0
 
     for timestamp, msg in reader.get_messages(topic):
-        if frame_idx % stride != 0:
+        if not use_keyframes and frame_idx % stride != 0:
             frame_idx += 1
             continue
 
-        if max_frames and frame_idx >= max_frames:
-            break
+        if max_frames:
+            limit = len(timestamps_paths) if use_keyframes else frame_idx
+            if limit >= max_frames:
+                break
 
         try:
             img = decode_image(msg)
+
+            if use_keyframes and not selector.should_select(img):
+                frame_idx += 1
+                continue
+
             fname = f"{frame_idx:06d}.{fmt}"
             fpath = output_dir / fname
 

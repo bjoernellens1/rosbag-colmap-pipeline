@@ -16,6 +16,7 @@ from colmap_rgbd_gt.dataset.schema import Workspace
 from colmap_rgbd_gt.dataset.manifest import Manifest
 from colmap_rgbd_gt.dataset.synchronization import (
     synchronize_rgb_depth,
+    align_depth_to_rgb_frames,
     export_associations_csv,
 )
 
@@ -77,6 +78,8 @@ def extract_pipeline(bag_path: Path, workspace: Path, config: dict[str, Any]) ->
         export_timestamps_csv(rgb_data, ws.layout.timestamps / "rgb.csv")
         if depth_data:
             export_timestamps_csv(depth_data, ws.layout.timestamps / "depth.csv")
+            logger.info("Re-keying depth frames to RGB frame_id...")
+            align_depth_to_rgb_frames(ws.layout.depth, depth_data, associations)
 
         start_ns, end_ns = (0, 0)
         if rgb_data:

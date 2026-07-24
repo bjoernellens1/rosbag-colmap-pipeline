@@ -46,6 +46,8 @@ def discover_rgb_topics(reader: BagReader) -> list[TopicInfo]:
 
     for conn in reader.get_connections():
         msgtype = conn.msgtype
+        if "depth" in conn.topic.lower():
+            continue
         if msgtype in IMAGE_TYPES:
             rgb_topics.append(TopicInfo(
                 name=conn.topic,
@@ -63,20 +65,30 @@ def discover_rgb_topics(reader: BagReader) -> list[TopicInfo]:
 
 
 def discover_depth_topics(reader: BagReader) -> list[TopicInfo]:
-    depth_topics = []
+    raw_topics = []
+    compressed_topics = []
 
     for conn in reader.get_connections():
         msgtype = conn.msgtype
-        if msgtype in IMAGE_TYPES:
-            topic_lower = conn.topic.lower()
-            if "depth" in topic_lower:
-                depth_topics.append(TopicInfo(
-                    name=conn.topic,
-                    msgtype=msgtype,
-                    message_count=conn.msgcount,
-                ))
+        topic_lower = conn.topic.lower()
+        if "depth" not in topic_lower:
+            continue
 
-    return depth_topics
+        if msgtype in IMAGE_TYPES:
+            raw_topics.append(TopicInfo(
+                name=conn.topic,
+                msgtype=msgtype,
+                message_count=conn.msgcount,
+            ))
+        elif msgtype in COMPRESSED_IMAGE_TYPES:
+            compressed_topics.append(TopicInfo(
+                name=conn.topic,
+                msgtype=msgtype,
+                message_count=conn.msgcount,
+            ))
+
+    # Prefer uncompressed depth when available (no decompression ambiguity).
+    return raw_topics + compressed_topics
 
 
 def discover_camera_info_topics(reader: BagReader) -> list[TopicInfo]:
@@ -111,7 +123,7 @@ def select_best_topics(reader: BagReader, config: dict[str, Any]) -> dict[str, s
     topics_config = config.get("topics", {})
     result = {}
 
-    if "rgb" in topics_config:
+    if topics_config.get("rgb"):
         result["rgb"] = topics_config["rgb"]
     else:
         rgb_topics = discover_rgb_topics(reader)
@@ -122,7 +134,7 @@ def select_best_topics(reader: BagReader, config: dict[str, Any]) -> dict[str, s
         if "rgb" not in result and rgb_topics:
             result["rgb"] = rgb_topics[0].name
 
-    if "depth" in topics_config:
+    if topics_config.get("depth"):
         result["depth"] = topics_config["depth"]
     else:
         depth_topics = discover_depth_topics(reader)
@@ -133,7 +145,7 @@ def select_best_topics(reader: BagReader, config: dict[str, Any]) -> dict[str, s
             if pc_topics:
                 result["pointcloud"] = pc_topics[0].name
 
-    if "camera_info" in topics_config:
+    if topics_config.get("camera_info"):
         result["camera_info"] = topics_config["camera_info"]
     else:
         info_topics = discover_camera_info_topics(reader)
@@ -141,8 +153,14 @@ def select_best_topics(reader: BagReader, config: dict[str, Any]) -> dict[str, s
             rgb_ns = ""
             if "rgb" in result:
                 parts = result["rgb"].split("/")
-                if len(parts) > 1:
-                    rgb_ns = "/".join(parts[:-1])
+                # Strip trailing image-topic components (e.g. ".../image_raw/
+                # compressed") to get the sensor namespace, e.g. "/camera/
+                # color" -- a single-segment strip is not enough for nested
+                # compressed-transport topics.
+                strip_suffixes = {"image_raw", "compressed", "compresseddepth", "raw", "image"}
+                while len(parts) > 1 and parts[-1].lower() in strip_suffixes:
+                    parts = parts[:-1]
+                rgb_ns = "/".join(parts)
 
             for t in info_topics:
                 if rgb_ns and t.name.startswith(rgb_ns):
