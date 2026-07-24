@@ -87,10 +87,28 @@ def project_colmap_points_to_image(
     if len(points_valid) == 0:
         return np.array([]).reshape(0, 2), np.array([]), np.array([], dtype=np.int64)
 
-    u = points_valid[:, 0] * intrinsics.fx / points_valid[:, 2] + intrinsics.cx
-    v = points_valid[:, 1] * intrinsics.fy / points_valid[:, 2] + intrinsics.cy
-    uv = np.stack([u, v], axis=-1)
     depths = points_valid[:, 2]
+
+    # COLMAP's 2D observations (and this pipeline's RGB/depth frames) live
+    # in the RAW distorted image, since features are extracted directly
+    # from distorted frames without undistortion. A pure pinhole
+    # projection ignores that, so for cameras with non-negligible
+    # distortion (e.g. real Orbbec/RealSense intrinsics) the projected uv
+    # can be off by tens of pixels near the edges -- enough to make every
+    # depth-tolerance correspondence check fail. Apply the same distortion
+    # model here via cv2.projectPoints so uv matches the actual pixel the
+    # 3D point would appear at in the source frame.
+    if intrinsics.distortion_coeffs and any(d != 0 for d in intrinsics.distortion_coeffs):
+        import cv2
+        D = np.array((intrinsics.distortion_coeffs[:5] + [0.0] * 5)[:5], dtype=np.float64)
+        rvec = np.zeros(3)
+        tvec_zero = np.zeros(3)
+        uv, _ = cv2.projectPoints(points_valid, rvec, tvec_zero, intrinsics.K, D)
+        uv = uv.reshape(-1, 2)
+    else:
+        u = points_valid[:, 0] * intrinsics.fx / points_valid[:, 2] + intrinsics.cx
+        v = points_valid[:, 1] * intrinsics.fy / points_valid[:, 2] + intrinsics.cy
+        uv = np.stack([u, v], axis=-1)
 
     valid_idx = np.where(valid)[0]
     return uv, depths, valid_idx

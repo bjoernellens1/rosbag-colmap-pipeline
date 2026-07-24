@@ -216,6 +216,8 @@ def estimate_global_scale(
         cy=intrinsics_data["K"][5],
         width=intrinsics_data["width"],
         height=intrinsics_data["height"],
+        distortion_model=intrinsics_data.get("distortion_model", "plumb_bob"),
+        distortion_coeffs=intrinsics_data.get("D", []),
     )
 
     sparse_dir = ws.layout.colmap / "sparse" / "0"
@@ -234,7 +236,20 @@ def estimate_global_scale(
     all_colmap_points = []
     per_frame_scales = []
 
-    for i, entry in enumerate(trajectory[:max_frames]):
+    # First pass: gather (depth image, projected uv/depth) per frame without
+    # any depth-tolerance filtering. `find_valid_correspondences` compares
+    # the *measured* depth (metric) against the *projected* COLMAP depth
+    # (arbitrary COLMAP units) directly, which implicitly assumes those two
+    # are already close in scale -- true for floor2/floor3 (scale ~1.1-1.2)
+    # but not in general (e.g. this trolley bag's COLMAP scale is ~0.5x
+    # metric), where every correspondence would be rejected before scale
+    # is even estimated. So compute a coarse global scale first from loose
+    # (pixel-valid, positive-depth) ratios, and use it to bring the
+    # projected depths into roughly metric units before the real
+    # depth-tolerance-gated matching below.
+    frame_cache = []
+    coarse_ratios = []
+    for entry in trajectory[:max_frames]:
         frame_id = entry["frame_id"]
         image_name = f"{frame_id:06d}.png"
 
@@ -272,11 +287,29 @@ def estimate_global_scale(
         if len(valid_idx) == 0:
             continue
 
+        h, w = depth.shape
+        u, v = uv[:, 0], uv[:, 1]
+        in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        if np.any(in_bounds):
+            ui = u[in_bounds].astype(int)
+            vi = v[in_bounds].astype(int)
+            d_meas = depth[vi, ui]
+            d_proj = depths_proj[in_bounds]
+            nonzero = d_meas > 0
+            if np.any(nonzero):
+                coarse_ratios.extend((d_meas[nonzero] / d_proj[nonzero]).tolist())
+
+        frame_cache.append((colmap_pts_all[valid_idx], uv, depths_proj, depth, entry))
+
+    coarse_scale = float(np.median(coarse_ratios)) if coarse_ratios else 1.0
+    logger.info(f"Coarse pre-scale estimate for correspondence matching: {coarse_scale:.4f}")
+
+    for colmap_pts_valid, uv, depths_proj, depth, entry in frame_cache:
         depth_pts_cam, colmap_pts_matched = find_valid_correspondences(
             depth,
-            colmap_pts_all[valid_idx],
+            colmap_pts_valid,
             uv,
-            depths_proj,
+            depths_proj * coarse_scale,
             intrinsics,
             depth_tolerance=config.get("depth_tolerance", 0.1),
         )
