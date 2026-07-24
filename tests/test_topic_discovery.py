@@ -100,6 +100,43 @@ def test_select_best_topics_null_config_values_fall_back_to_discovery():
     assert topics["camera_info"] == "/camera/color/camera_info"
 
 
+def _orbbec_femto_bag_connections():
+    # Uncompressed raw-image driver (Orbbec Femto Mega): color, depth, AND
+    # an IR stream that is also plain sensor_msgs/Image -- indistinguishable
+    # from the real color topic by message type alone.
+    return [
+        _FakeConnection("/camera/ir/image_raw", "sensor_msgs/msg/Image"),
+        _FakeConnection("/camera/ir/camera_info", "sensor_msgs/msg/CameraInfo"),
+        _FakeConnection("/camera/color/image_raw", "sensor_msgs/msg/Image"),
+        _FakeConnection("/camera/color/camera_info", "sensor_msgs/msg/CameraInfo"),
+        _FakeConnection("/camera/depth/image_raw", "sensor_msgs/msg/Image"),
+        _FakeConnection("/camera/depth/camera_info", "sensor_msgs/msg/CameraInfo"),
+        _FakeConnection("/camera/depth/points", "sensor_msgs/msg/PointCloud2"),
+    ]
+
+
+def test_discover_rgb_topics_excludes_ir_stream():
+    from colmap_rgbd_gt.ingest.topic_discovery import discover_rgb_topics
+    reader = _FakeReader(_orbbec_femto_bag_connections())
+
+    rgb_topics = discover_rgb_topics(reader)
+
+    names = [t.name for t in rgb_topics]
+    assert "/camera/color/image_raw" in names
+    assert "/camera/ir/image_raw" not in names
+
+
+def test_select_best_topics_picks_color_not_ir():
+    from colmap_rgbd_gt.ingest.topic_discovery import select_best_topics
+    reader = _FakeReader(_orbbec_femto_bag_connections())
+
+    topics = select_best_topics(reader, {})
+
+    assert topics["rgb"] == "/camera/color/image_raw"
+    assert topics["depth"] == "/camera/depth/image_raw"
+    assert topics["camera_info"] == "/camera/color/camera_info"
+
+
 def test_select_best_topics_explicit_override_still_honored():
     from colmap_rgbd_gt.ingest.topic_discovery import select_best_topics
     reader = _FakeReader(_rgbd_bag_connections())

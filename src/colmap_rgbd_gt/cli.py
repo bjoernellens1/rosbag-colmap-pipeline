@@ -272,6 +272,51 @@ def depth_ba(
         raise typer.Exit(1)
 
 
+@app.command("export-bag")
+def export_bag(
+    bag_path: Path = typer.Argument(..., help="Path to the original rosbag"),
+    workspace: Path = typer.Option(..., "--workspace", "-w", help="Path to workspace directory (must have a completed scale-depth run)"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output bag path (default: <bag>_processed alongside the original)"),
+    pose_topic: str = typer.Option("/gt/pose", "--pose-topic", help="Topic for per-frame GT PoseStamped messages"),
+    path_topic: str = typer.Option("/gt/path", "--path-topic", help="Topic for the summary GT nav_msgs/Path message"),
+    frame_id: str = typer.Option("map", "--frame-id", help="Frame ID for the GT pose/path headers"),
+) -> None:
+    """
+    Write a '_processed' copy of the original bag containing every original
+    message plus the estimated metric GT trajectory, on a new PoseStamped
+    topic (per-frame) and a summary Path topic.
+    """
+    setup_logging("INFO")
+
+    if not bag_path.exists():
+        console.print(f"[red]Error: Bag file not found: {bag_path}[/red]")
+        raise typer.Exit(1)
+    if not workspace.exists():
+        console.print(f"[red]Error: Workspace not found: {workspace}[/red]")
+        raise typer.Exit(1)
+
+    from colmap_rgbd_gt.pipelines.export_bag_pipeline import export_bag_pipeline
+
+    config = {
+        "export_bag": {
+            "output_path": str(output) if output else None,
+            "pose_topic": pose_topic,
+            "path_topic": path_topic,
+            "frame_id": frame_id,
+        }
+    }
+
+    console.print(f"[cyan]Writing processed bag for: {bag_path}[/cyan]")
+
+    success = export_bag_pipeline(bag_path, workspace, config)
+
+    if success:
+        console.print("[green]✓ Processed bag written[/green]")
+    else:
+        console.print("[red]✗ Failed to write processed bag[/red]")
+        raise typer.Exit(1)
+
+
 @app.command("export-tum")
 def export_tum(
     workspace: Path = typer.Argument(..., help="Path to workspace directory"),

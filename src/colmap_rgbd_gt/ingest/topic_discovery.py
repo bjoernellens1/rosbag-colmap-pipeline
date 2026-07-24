@@ -39,6 +39,19 @@ POINTCLOUD_TYPES = {
 
 DEPTH_ENCODINGS = {"16UC1", "32FC1", "mono16"}
 
+# Path segments (not substrings -- avoids false positives like "mirror" or
+# "first") that mark a topic as a non-RGB image stream a depth camera
+# driver commonly also publishes: depth itself, and the IR/NIR stream used
+# for active-stereo depth sensing (e.g. Orbbec's /camera/ir/image_raw),
+# which is `sensor_msgs/Image` just like the real color stream and would
+# otherwise be indistinguishable from it by message type alone.
+_NON_RGB_TOPIC_SEGMENTS = {"depth", "ir", "infra", "infrared", "nir"}
+_PREFERRED_RGB_SEGMENTS = {"color", "rgb"}
+
+
+def _topic_segments(topic: str) -> set[str]:
+    return set(topic.lower().strip("/").split("/"))
+
 
 def discover_rgb_topics(reader: BagReader) -> list[TopicInfo]:
     rgb_topics = []
@@ -46,7 +59,7 @@ def discover_rgb_topics(reader: BagReader) -> list[TopicInfo]:
 
     for conn in reader.get_connections():
         msgtype = conn.msgtype
-        if "depth" in conn.topic.lower():
+        if _topic_segments(conn.topic) & _NON_RGB_TOPIC_SEGMENTS:
             continue
         if msgtype in IMAGE_TYPES:
             rgb_topics.append(TopicInfo(
@@ -60,6 +73,16 @@ def discover_rgb_topics(reader: BagReader) -> list[TopicInfo]:
                 msgtype=msgtype,
                 message_count=conn.msgcount,
             ))
+
+    # Among remaining candidates, prefer ones explicitly named color/rgb --
+    # if a depth camera driver publishes some other non-excluded auxiliary
+    # image stream, don't let discovery order alone decide.
+    def _sort_key(t: TopicInfo) -> tuple[int, str]:
+        preferred = bool(_topic_segments(t.name) & _PREFERRED_RGB_SEGMENTS)
+        return (0 if preferred else 1, t.name)
+
+    rgb_topics.sort(key=_sort_key)
+    compressed_topics.sort(key=_sort_key)
 
     return rgb_topics + compressed_topics
 

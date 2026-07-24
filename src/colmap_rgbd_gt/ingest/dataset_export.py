@@ -1,7 +1,9 @@
 """Dataset export utilities."""
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+import os
 import cv2
 import numpy as np
 
@@ -15,6 +17,21 @@ from colmap_rgbd_gt.utils.time import ros_time_to_nanoseconds
 from colmap_rgbd_gt.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Per-frame decode/encode/write is CPU-bound but each frame is independent
+# (no cross-frame state), and OpenCV releases the GIL for the bulk of that
+# work (imdecode/imencode/imwrite), so a thread pool gives real parallelism
+# here despite the GIL. Bag message reading itself stays strictly
+# sequential (single iterator over one file) -- only the per-frame
+# processing is offloaded.
+_DEFAULT_WORKERS = min(8, (os.cpu_count() or 4))
+
+
+def _write_rgb_frame(fpath: Path, img: np.ndarray, fmt: str) -> None:
+    if fmt == "png":
+        cv2.imwrite(str(fpath), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+    else:
+        cv2.imwrite(str(fpath), img)
 
 
 def export_rgb_frames(
@@ -39,48 +56,82 @@ def export_rgb_frames(
         else None
     )
     stride = config.get("min_frame_stride", 1)
+    num_workers = config.get("num_workers", _DEFAULT_WORKERS)
 
     timestamps_paths = []
     frame_idx = 0
+    write_futures: list[Future] = []
 
-    for timestamp, msg in reader.get_messages(topic):
-        if not use_keyframes and frame_idx % stride != 0:
-            frame_idx += 1
-            continue
-
-        if max_frames:
-            limit = len(timestamps_paths) if use_keyframes else frame_idx
-            if limit >= max_frames:
-                break
-
-        try:
-            img = decode_image(msg)
-
-            if use_keyframes and not selector.should_select(img):
+    # Frame selection (decode + keyframe decision) is inherently sequential
+    # -- KeyframeSelector compares each candidate against the last
+    # *selected* keyframe, so it must see frames in order. Only the actual
+    # disk write is independent per selected frame, so it's offloaded to a
+    # background pool: the sequential decode/decide loop doesn't block on
+    # PNG encode + I/O latency, which is most of a frame's wall-clock cost.
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        for timestamp, msg in reader.get_messages(topic):
+            if not use_keyframes and frame_idx % stride != 0:
                 frame_idx += 1
                 continue
 
-            fname = f"{frame_idx:06d}.{fmt}"
-            fpath = output_dir / fname
+            if max_frames:
+                limit = len(timestamps_paths) if use_keyframes else frame_idx
+                if limit >= max_frames:
+                    break
 
-            if fmt == "png":
-                cv2.imwrite(str(fpath), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-            else:
-                cv2.imwrite(str(fpath), img)
+            try:
+                img = decode_image(msg)
 
-            ts_ns = timestamp
-            timestamps_paths.append((ts_ns, fname))
+                if use_keyframes and not selector.should_select(img):
+                    frame_idx += 1
+                    continue
 
-            if frame_idx % 100 == 0:
-                logger.debug(f"Exported RGB frame {frame_idx}")
+                fname = f"{frame_idx:06d}.{fmt}"
+                fpath = output_dir / fname
+                write_futures.append(executor.submit(_write_rgb_frame, fpath, img, fmt))
 
-        except Exception as e:
-            logger.warning(f"Failed to decode frame {frame_idx}: {e}")
+                ts_ns = timestamp
+                timestamps_paths.append((ts_ns, fname))
 
-        frame_idx += 1
+                if frame_idx % 100 == 0:
+                    logger.debug(f"Exported RGB frame {frame_idx}")
+
+            except Exception as e:
+                logger.warning(f"Failed to decode frame {frame_idx}: {e}")
+
+            frame_idx += 1
+
+        for future in write_futures:
+            future.result()  # surface any write errors before returning
 
     logger.info(f"Exported {len(timestamps_paths)} RGB frames to {output_dir}")
     return timestamps_paths
+
+
+def _process_depth_frame(
+    frame_idx: int,
+    timestamp: int,
+    msg: Any,
+    output_dir: Path,
+    scale: float,
+    min_m: float,
+    max_m: float,
+) -> tuple[int, int, str] | None:
+    """Decode/filter/encode/write one depth frame. Independent per frame --
+    safe to run off the main thread."""
+    try:
+        depth_m = decode_depth_image(msg, scale=scale)
+        depth_m = filter_depth_range(depth_m, min_m=min_m, max_m=max_m)
+        depth_uint16 = depth_to_uint16(depth_m, scale=1000.0)
+
+        fname = f"{frame_idx:06d}.png"
+        fpath = output_dir / fname
+        cv2.imwrite(str(fpath), depth_uint16, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
+        return frame_idx, timestamp, fname
+    except Exception as e:
+        logger.warning(f"Failed to decode depth frame {frame_idx}: {e}")
+        return None
 
 
 def export_depth_frames(
@@ -95,34 +146,35 @@ def export_depth_frames(
     scale = config.get("unit_scale_to_meters", 0.001)
     min_m = config.get("min_depth_m", 0.2)
     max_m = config.get("max_depth_m", 8.0)
+    num_workers = config.get("num_workers", _DEFAULT_WORKERS)
 
-    timestamps_paths = []
     frame_idx = 0
+    futures: list[Future] = []
 
-    for timestamp, msg in reader.get_messages(topic):
-        if frame_idx % stride != 0:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        for timestamp, msg in reader.get_messages(topic):
+            if frame_idx % stride != 0:
+                frame_idx += 1
+                continue
+
+            if max_frames and frame_idx >= max_frames:
+                break
+
+            futures.append(executor.submit(
+                _process_depth_frame, frame_idx, timestamp, msg,
+                output_dir, scale, min_m, max_m,
+            ))
             frame_idx += 1
-            continue
 
-        if max_frames and frame_idx >= max_frames:
-            break
-
-        try:
-            depth_m = decode_depth_image(msg, scale=scale)
-            depth_m = filter_depth_range(depth_m, min_m=min_m, max_m=max_m)
-            depth_uint16 = depth_to_uint16(depth_m, scale=1000.0)
-
-            fname = f"{frame_idx:06d}.png"
-            fpath = output_dir / fname
-            cv2.imwrite(str(fpath), depth_uint16, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            ts_ns = timestamp
-            timestamps_paths.append((ts_ns, fname))
-
-        except Exception as e:
-            logger.warning(f"Failed to decode depth frame {frame_idx}: {e}")
-
-        frame_idx += 1
+        # Futures are submitted in increasing frame_idx order; resolving in
+        # that same order keeps the returned list frame_idx-sorted without
+        # needing an extra sort pass.
+        timestamps_paths = []
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                _, ts_ns, fname = result
+                timestamps_paths.append((ts_ns, fname))
 
     logger.info(f"Exported {len(timestamps_paths)} depth frames to {output_dir}")
     return timestamps_paths

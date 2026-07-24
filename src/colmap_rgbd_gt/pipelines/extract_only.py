@@ -51,7 +51,18 @@ def extract_pipeline(bag_path: Path, workspace: Path, config: dict[str, Any]) ->
 
         images_config = config.get("images", {})
         depth_config = config.get("depth", {})
+        storage_id = reader.storage_id
 
+        # RGB, depth, and camera-info reads must stay sequential against a
+        # single BagReader: concurrent BagReader instances on the same file
+        # were tried (each topic read on its own thread) but caused
+        # intermittent "decompression error: Data corruption detected" on
+        # a real (chunk-compressed) mcap file under concurrent load --
+        # opening/listing topics concurrently is safe, but concurrent
+        # message-chunk decompression is not. The actual CPU-bound
+        # per-frame work (decode/encode/write) is still parallelized
+        # within each of these calls via a thread pool, which doesn't
+        # touch the bag reader concurrently.
         logger.info("Extracting RGB frames...")
         rgb_data = export_rgb_frames(reader, ws.layout.rgb, rgb_topic, images_config)
 
@@ -93,7 +104,7 @@ def extract_pipeline(bag_path: Path, workspace: Path, config: dict[str, Any]) ->
             time_range=(start_ns, end_ns),
             camera_info=camera_info,
             settings=config,
-            storage_id=reader.storage_id,
+            storage_id=storage_id,
         )
         manifest.save(ws.layout.manifest)
 
