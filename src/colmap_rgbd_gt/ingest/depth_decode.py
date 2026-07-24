@@ -3,6 +3,10 @@
 import numpy as np
 from typing import Any
 
+from colmap_rgbd_gt.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 def decode_depth_image(msg: Any, scale: float = 0.001) -> np.ndarray:
     encoding = msg.encoding.lower()
@@ -20,6 +24,9 @@ def decode_depth_image(msg: Any, scale: float = 0.001) -> np.ndarray:
         depth = data.view(dtype=np.uint16).reshape((height, width))
         depth_m = depth.astype(np.float64) * scale
     else:
+        logger.warning(
+            f"Unknown depth encoding '{msg.encoding}', assuming uint16 with scale={scale}"
+        )
         depth = data.view(dtype=np.uint16).reshape((height, width))
         depth_m = depth.astype(np.float64) * scale
 

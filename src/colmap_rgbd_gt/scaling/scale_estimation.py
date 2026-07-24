@@ -25,6 +25,13 @@ def estimate_scale_median(
     depth_points: np.ndarray,
     colmap_points: np.ndarray
 ) -> ScaleEstimate:
+    """Estimate scale s such that metric (depth) ~= s * colmap.
+
+    `scale` is the multiplier applied to COLMAP's arbitrary-unit
+    quantities to recover metric units (i.e. `depth_norm / colmap_norm`),
+    consistent with how callers (e.g. `scale_trajectory`) apply it directly
+    to COLMAP-frame translations.
+    """
     depth_norms = np.linalg.norm(depth_points, axis=1)
     colmap_norms = np.linalg.norm(colmap_points, axis=1)
 
@@ -38,7 +45,7 @@ def estimate_scale_median(
             inlier_ratio=0.0,
         )
 
-    ratios = colmap_norms[valid] / depth_norms[valid]
+    ratios = depth_norms[valid] / colmap_norms[valid]
     scale = float(np.median(ratios))
 
     mad = np.median(np.abs(ratios - scale))
@@ -62,6 +69,14 @@ def estimate_scale_umeyama(
     depth_points: np.ndarray,
     colmap_points: np.ndarray
 ) -> ScaleEstimate:
+    """Estimate the similarity transform mapping COLMAP points to metric
+    depth points: depth ~= scale * R @ colmap + t.
+
+    `scale` is therefore the multiplier applied to COLMAP-frame quantities
+    to recover metric units, consistent with `estimate_scale_median`/
+    `estimate_scale_ransac` and with how callers apply the result directly
+    to COLMAP-frame translations.
+    """
     if len(depth_points) < 3 or len(colmap_points) < 3:
         return ScaleEstimate(
             scale=1.0,
@@ -77,9 +92,9 @@ def estimate_scale_umeyama(
     depth_centered = depth_points - depth_mean
     colmap_centered = colmap_points - colmap_mean
 
-    depth_var = np.mean(np.sum(depth_centered ** 2, axis=1))
+    colmap_var = np.mean(np.sum(colmap_centered ** 2, axis=1))
 
-    cov = colmap_centered.T @ depth_centered / len(depth_points)
+    cov = depth_centered.T @ colmap_centered / len(depth_points)
 
     U, S, Vt = np.linalg.svd(cov)
 
@@ -87,12 +102,12 @@ def estimate_scale_umeyama(
     S_prime = np.diag([1, 1, d])
 
     R = U @ S_prime @ Vt
-    scale = np.trace(np.diag(S) @ S_prime) / depth_var if depth_var > 0 else 1.0
+    scale = np.trace(np.diag(S) @ S_prime) / colmap_var if colmap_var > 0 else 1.0
 
-    t = colmap_mean - scale * R @ depth_mean
+    t = depth_mean - scale * R @ colmap_mean
 
-    transformed = scale * (R @ depth_points.T).T + t
-    residuals = np.linalg.norm(colmap_points - transformed, axis=1)
+    transformed = scale * (R @ colmap_points.T).T + t
+    residuals = np.linalg.norm(depth_points - transformed, axis=1)
 
     inlier_threshold = np.median(residuals) * 2
     inliers = residuals < inlier_threshold
@@ -113,8 +128,11 @@ def estimate_scale_ransac(
     depth_points: np.ndarray,
     colmap_points: np.ndarray,
     iterations: int = 1000,
-    inlier_threshold: float = 0.05
+    inlier_threshold: float = 0.05,
+    seed: int = 42,
 ) -> ScaleEstimate:
+    """Estimate scale s such that metric (depth) ~= s * colmap, matching the
+    convention used by `estimate_scale_median`/`estimate_scale_umeyama`."""
     if len(depth_points) < 3:
         return ScaleEstimate(
             scale=1.0,
@@ -136,17 +154,17 @@ def estimate_scale_ransac(
     best_inliers = 0
     best_inlier_mask = np.zeros(len(valid), dtype=bool)
 
-    np.random.seed(42)
+    rng = np.random.default_rng(seed)
 
     for _ in range(iterations):
-        idx = np.random.choice(len(valid_indices), min(3, len(valid_indices)), replace=False)
-        sample_scales = colmap_norms[idx] / depth_norms[idx]
+        idx = rng.choice(len(valid_indices), min(3, len(valid_indices)), replace=False)
+        sample_scales = depth_norms[idx] / colmap_norms[idx]
         candidate_scale = np.median(sample_scales)
 
         if candidate_scale <= 0:
             continue
 
-        ratios = colmap_norms / depth_norms
+        ratios = depth_norms / colmap_norms
         residuals = np.abs(ratios - candidate_scale) / candidate_scale
         inlier_mask = residuals < inlier_threshold
         num_inliers = np.sum(inlier_mask)
@@ -175,11 +193,14 @@ def estimate_global_scale(
     from colmap_rgbd_gt.dataset.schema import Workspace
     from colmap_rgbd_gt.dataset.manifest import Manifest
     from colmap_rgbd_gt.colmap.pose_extract import extract_trajectory
-    from colmap_rgbd_gt.colmap.reconstruction import load_sparse_model
-    from colmap_rgbd_gt.scaling.correspondences import find_colmap_points_in_image
-    from colmap_rgbd_gt.scaling.backproject import backproject_depth_image, transform_to_world
+    from colmap_rgbd_gt.colmap.reconstruction import load_sparse_model, get_image_id_by_name
+    from colmap_rgbd_gt.scaling.correspondences import (
+        find_colmap_points_in_image,
+        project_colmap_points_to_image,
+        find_valid_correspondences,
+    )
+    from colmap_rgbd_gt.scaling.backproject import transform_to_world
     from colmap_rgbd_gt.utils.camera import CameraIntrinsics
-    from colmap_rgbd_gt.utils.transforms import colmap_pose_to_c2w
 
     ws = Workspace(workspace)
     manifest = Manifest.load(ws.layout.manifest)
@@ -217,9 +238,12 @@ def estimate_global_scale(
         frame_id = entry["frame_id"]
         image_name = f"{frame_id:06d}.png"
 
-        colmap_pts = find_colmap_points_in_image(model, image_name)
-        if len(colmap_pts) < min_points:
+        colmap_pts_all = find_colmap_points_in_image(model, image_name)
+        if len(colmap_pts_all) < min_points:
             continue
+
+        if sample_stride > 1:
+            colmap_pts_all = colmap_pts_all[::sample_stride]
 
         depth_path = ws.get_depth_path(frame_id)
         if not depth_path.exists():
@@ -231,22 +255,48 @@ def estimate_global_scale(
             continue
         depth = depth.astype(np.float64) / 1000.0
 
-        R_c2w, t_c2w = entry["R"], entry["t"]
+        # `project_colmap_points_to_image` expects a world-to-camera (w2c)
+        # pose as (qvec, tvec) and applies R @ X + t. Pull this directly
+        # from the COLMAP image entry rather than the trajectory's c2w
+        # (R, t), to avoid any ambiguity about pose convention.
+        image_id = get_image_id_by_name(model, image_name)
+        if image_id is None:
+            continue
+        img_entry = model["images"][image_id]
+        qvec_w2c = np.array(img_entry["qvec"], dtype=np.float64)
+        tvec_w2c = np.array(img_entry["tvec"], dtype=np.float64)
 
-        depth_pts = backproject_depth_image(depth, intrinsics)
-        depth_pts_world = transform_to_world(depth_pts, (R_c2w, t_c2w))
+        uv, depths_proj, valid_idx = project_colmap_points_to_image(
+            colmap_pts_all, (qvec_w2c, tvec_w2c), intrinsics
+        )
+        if len(valid_idx) == 0:
+            continue
+
+        depth_pts_cam, colmap_pts_matched = find_valid_correspondences(
+            depth,
+            colmap_pts_all[valid_idx],
+            uv,
+            depths_proj,
+            intrinsics,
+            depth_tolerance=config.get("depth_tolerance", 0.1),
+        )
+        if len(depth_pts_cam) == 0:
+            continue
 
         min_depth = config.get("min_depth_m", 0.2)
         max_depth = config.get("max_depth_m", 8.0)
 
-        depth_norms = np.linalg.norm(depth_pts, axis=1)
+        depth_norms = np.linalg.norm(depth_pts_cam, axis=1)
         valid = (depth_norms >= min_depth) & (depth_norms <= max_depth)
 
-        if np.sum(valid) < min_points:
+        if np.sum(valid) < 3:
             continue
 
-        all_depth_points.extend(depth_pts_world[valid].tolist())
-        all_colmap_points.extend(colmap_pts.tolist())
+        R_c2w, t_c2w = entry["R"], entry["t"]
+        depth_pts_world = transform_to_world(depth_pts_cam[valid], (R_c2w, t_c2w))
+
+        all_depth_points.extend(depth_pts_world.tolist())
+        all_colmap_points.extend(colmap_pts_matched[valid].tolist())
 
     if len(all_depth_points) < 100:
         logger.warning(f"Insufficient correspondences: {len(all_depth_points)}")

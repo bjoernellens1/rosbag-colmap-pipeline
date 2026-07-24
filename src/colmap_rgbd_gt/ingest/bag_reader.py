@@ -5,13 +5,13 @@ from typing import Any, Iterator
 import numpy as np
 from rosbags.rosbag1 import Reader as ReaderV1
 from rosbags.rosbag2 import Reader as ReaderV2
-from rosbags.types.stores.ros1_noetic import (
+from rosbags.typesys.stores.ros1_noetic import (
     sensor_msgs__msg__Image as ImageV1,
     sensor_msgs__msg__CompressedImage as CompressedImageV1,
     sensor_msgs__msg__CameraInfo as CameraInfoV1,
     sensor_msgs__msg__PointCloud2 as PointCloud2V1,
 )
-from rosbags.types.stores.ros2_humble import (
+from rosbags.typesys.stores.ros2_humble import (
     sensor_msgs__msg__Image as ImageV2,
     sensor_msgs__msg__CompressedImage as CompressedImageV2,
     sensor_msgs__msg__CameraInfo as CameraInfoV2,
@@ -82,13 +82,18 @@ class BagReader:
         return start, end
 
     def get_messages(self, topic: str) -> Iterator[tuple[int, Any]]:
-        from rosbags.types import get_typeset
+        from rosbags.typesys import get_typestore
+        from rosbags.typesys.stores import Stores
 
-        typestore = get_typeset(self._is_ros2, "humble" if self._is_ros2 else "noetic")
+        typestore_name = Stores.ROS2_HUMBLE if self._is_ros2 else Stores.ROS1_NOETIC
+        typestore = get_typestore(typestore_name)
 
         connections = [c for c in self._reader.connections if c.topic == topic]
         for conn, timestamp, rawdata in self._reader.messages(connections=connections):
-            msg = typestore.deserialize_cdr(ros1_to_cdr(rawdata, conn.msgtype), conn.msgtype) if self._is_ros2 else typestore.deserialize(rawdata, conn.msgtype)
+            if self._is_ros2:
+                msg = typestore.deserialize_cdr(ros1_to_cdr(rawdata, conn.msgtype), conn.msgtype)
+            else:
+                msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
             yield timestamp, msg
 
 

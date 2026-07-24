@@ -38,6 +38,14 @@ scaling:
   outlier_rejection: ransac
   robust_statistic: median
 
+depth_ba:
+  enabled: false
+  depth_tolerance: 0.1
+  obs_sigma_base: 0.01
+  obs_sigma_quadratic: 0.0
+  max_iterations: 50
+  max_frames_for_ba: 100
+
 export:
   tum: true
   csv: true

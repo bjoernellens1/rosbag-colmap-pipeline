@@ -4,8 +4,13 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     volumes:
-      - ../data:/app/data:ro
       - ./workspaces:/app/workspaces
+      - /mnt/cps_persistent1_shared/datasets/public:/mnt/datasets/public:ro
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
     command: ["--help"]
 
   dev:
@@ -13,8 +18,13 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.dev
     volumes:
-      - ..:/app:rw
       - ./workspaces:/app/workspaces
+      - /mnt/cps_persistent1_shared/datasets/public:/mnt/datasets/public:ro
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
     working_dir: /app
     stdin_open: true
     tty: true

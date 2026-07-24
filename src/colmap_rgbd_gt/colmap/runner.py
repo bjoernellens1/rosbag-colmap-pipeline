@@ -1,12 +1,13 @@
 """COLMAP CLI runner."""
 
-import subprocess
 import shutil
-from pathlib import Path
-from typing import Any
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TextIO
 
 from colmap_rgbd_gt.logging import get_logger
+from colmap_rgbd_gt.colmap.reconstruction import ensure_text_model
 from colmap_rgbd_gt.utils.io import ensure_dir
 
 logger = get_logger(__name__)
@@ -32,27 +33,61 @@ class COLMAPRunner:
     def find_colmap(self) -> str | None:
         return shutil.which(self.colmap_path)
 
+    def _stream_pipe(
+        self,
+        pipe: TextIO | None,
+        *,
+        log_path: Path,
+        log_method: Any,
+    ) -> list[str]:
+        captured: list[str] = []
+        if pipe is None:
+            return captured
+
+        with log_path.open("w", encoding="utf-8") as log_file:
+            for raw_line in pipe:
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                captured.append(line)
+                print(line, flush=True)
+                log_method(line)
+                log_file.write(line + "\n")
+                log_file.flush()
+
+        return captured
+
     def _run_command(self, args: list[str], env: dict[str, str] | None = None) -> COLMAPResult:
         import os
         full_env = os.environ.copy()
         if env:
             full_env.update(env)
 
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        ensure_dir(self.logs_dir)
+        command_name = args[0]
+        combined_log = self.logs_dir / f"{command_name}.log"
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [self.colmap_path] + args,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 cwd=str(self.workspace),
                 env=full_env,
             )
+            combined_lines = self._stream_pipe(
+                process.stdout,
+                log_path=combined_log,
+                log_method=logger.info,
+            )
+            return_code = process.wait()
             return COLMAPResult(
-                success=result.returncode == 0,
-                return_code=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                success=return_code == 0,
+                return_code=return_code,
+                stdout="\n".join(combined_lines),
+                stderr="",
             )
         except FileNotFoundError:
             logger.error(f"COLMAP not found at {self.colmap_path}")
@@ -141,6 +176,9 @@ class COLMAPRunner:
         result = self._run_command(args)
 
         if result.success:
+            sparse_model_dir = self.sparse_dir / "0"
+            if sparse_model_dir.exists():
+                ensure_text_model(sparse_model_dir, colmap_path=self.colmap_path)
             logger.info("Mapper completed")
         else:
             logger.error(f"Mapper failed: {result.stderr}")

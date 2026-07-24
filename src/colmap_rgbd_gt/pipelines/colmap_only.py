@@ -39,7 +39,7 @@ def colmap_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         return False
 
     unscaled_path = ws.layout.outputs / "trajectory_colmap_unscaled.txt"
-    export_trajectory_tum(trajectory, unscaled_path, scale=1.0)
+    export_trajectory_tum(trajectory, unscaled_path)
 
     logger.info(f"COLMAP pipeline complete: {len(trajectory)} poses")
     return True

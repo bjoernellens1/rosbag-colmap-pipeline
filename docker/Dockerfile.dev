@@ -1,4 +1,6 @@
-FROM ubuntu:24.04
+# ROCm 7.2 + PyTorch base (Ubuntu 24.04, Python 3.12) -- see docker/Dockerfile
+# for rationale.
+FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -23,12 +25,12 @@ RUN apt-get update && apt-get install -y \
     vim \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.12 -m venv /opt/venv
+RUN python3.12 -m venv --system-site-packages /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-RUN uv pip install --system --upgrade pip setuptools wheel
+RUN uv pip install --upgrade pip setuptools wheel
 
 RUN apt-get update && apt-get install -y colmap && rm -rf /var/lib/apt/lists/*
 
@@ -36,11 +38,13 @@ WORKDIR /app
 
 COPY requirements/dev.txt /app/requirements/
 COPY requirements/base.txt /app/requirements/
-RUN uv pip install --system -r requirements/dev.txt
+RUN uv pip install -r requirements/dev.txt
 
 COPY pyproject.toml /app/
+COPY configs/ /app/configs/
 COPY src/ /app/src/
-RUN uv pip install --system -e .
+COPY tests/ /app/tests/
+RUN uv pip install -e ".[depth-ba,dev]"
 
 RUN mkdir -p /app/data/raw /app/data/workspaces /app/data/samples
 

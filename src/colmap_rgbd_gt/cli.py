@@ -228,6 +228,50 @@ def scale_depth(
         raise typer.Exit(1)
 
 
+@app.command("depth-ba")
+def depth_ba(
+    workspace: Path = typer.Argument(..., help="Path to workspace directory"),
+    depth_tolerance: float = typer.Option(0.1, "--depth-tolerance", help="Relative depth-vs-reprojection tolerance"),
+    max_iterations: int = typer.Option(50, "--max-iterations", help="Max LM iterations per BA stage"),
+) -> None:
+    """
+    Run depth-aware bundle adjustment to jointly refine poses and sparse
+    structure against metric depth (requires the 'depth-ba' extra:
+    pip install colmap-rgbd-gt[depth-ba]).
+    """
+    setup_logging("INFO")
+
+    if not workspace.exists():
+        console.print(f"[red]Error: Workspace not found: {workspace}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        from colmap_rgbd_gt.pipelines.depth_ba_pipeline import depth_ba_pipeline
+    except ImportError:
+        console.print(
+            "[red]depth-ba requires the optional extra: "
+            "pip install colmap-rgbd-gt[depth-ba][/red]"
+        )
+        raise typer.Exit(1)
+
+    config = {
+        "depth_ba": {
+            "depth_tolerance": depth_tolerance,
+            "max_iterations": max_iterations,
+        }
+    }
+
+    console.print(f"[cyan]Running depth-aware bundle adjustment for: {workspace}[/cyan]")
+
+    success = depth_ba_pipeline(workspace, config)
+
+    if success:
+        console.print("[green]✓ Depth-aware bundle adjustment complete[/green]")
+    else:
+        console.print("[red]✗ Depth-aware bundle adjustment failed[/red]")
+        raise typer.Exit(1)
+
+
 @app.command("export-tum")
 def export_tum(
     workspace: Path = typer.Argument(..., help="Path to workspace directory"),
@@ -272,6 +316,7 @@ def full_pipeline(
     rgb_topic: Optional[str] = typer.Option(None, "--rgb", help="RGB topic name"),
     depth_topic: Optional[str] = typer.Option(None, "--depth", help="Depth topic name"),
     camera_info_topic: Optional[str] = typer.Option(None, "--camera-info", help="Camera info topic name"),
+    depth_ba: bool = typer.Option(False, "--depth-ba/--no-depth-ba", help="Run depth-aware bundle adjustment after scale estimation (requires the 'depth-ba' extra)"),
     log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level"),
 ) -> None:
     """
@@ -301,6 +346,8 @@ def full_pipeline(
         config_dict.setdefault("topics", {})["depth"] = depth_topic
     if camera_info_topic:
         config_dict.setdefault("topics", {})["camera_info"] = camera_info_topic
+    if depth_ba:
+        config_dict.setdefault("depth_ba", {})["enabled"] = True
 
     from colmap_rgbd_gt.pipelines.full_pipeline import full_pipeline as run_full
 

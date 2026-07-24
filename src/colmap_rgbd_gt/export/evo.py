@@ -13,7 +13,6 @@ logger = get_logger(__name__)
 def export_for_evo(
     poses: list[dict[str, Any]],
     path: Path,
-    scale: float = 1.0,
     format_type: str = "tum"
 ) -> None:
     path = Path(path)
@@ -21,21 +20,20 @@ def export_for_evo(
 
     if ext in (".tum", "") or format_type == "tum":
         tum_path = path.with_suffix(".tum") if ext == "" else path
-        export_tum(poses, tum_path, scale=scale)
+        export_tum(poses, tum_path)
         logger.info(f"Exported evo-compatible TUM file to {tum_path}")
 
     elif ext == ".kitti" or format_type == "kitti":
-        export_kitti(poses, path, scale=scale)
+        export_kitti(poses, path)
         logger.info(f"Exported evo-compatible KITTI file to {path}")
 
     else:
-        export_tum(poses, path, scale=scale)
+        export_tum(poses, path)
 
 
 def export_kitti(
     poses: list[dict[str, Any]],
     path: Path,
-    scale: float = 1.0
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +41,7 @@ def export_kitti(
     with open(path, "w") as f:
         for pose in poses:
             R = pose["R"]
-            t = pose["t"] * scale
+            t = pose["t"]
 
             mat = np.eye(4)
             mat[:3, :3] = R

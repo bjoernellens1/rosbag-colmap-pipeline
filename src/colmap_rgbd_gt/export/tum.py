@@ -23,12 +23,12 @@ class TUMEntry:
     qw: float
 
 
-def pose_to_tum_entry(pose: dict[str, Any], scale: float = 1.0) -> TUMEntry:
+def pose_to_tum_entry(pose: dict[str, Any]) -> TUMEntry:
     ts = pose.get("timestamp_ns", pose.get("frame_id", 0))
     if isinstance(ts, int):
         ts = ts / 1e9
 
-    t = pose["t"] * scale
+    t = pose["t"]
     R = pose["R"]
 
     q = rotation_matrix_to_quaternion(R)
@@ -49,14 +49,13 @@ def export_tum(
     poses: list[dict[str, Any]],
     path: Path,
     timestamps: list[float] | None = None,
-    scale: float = 1.0
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     entries = []
     for i, pose in enumerate(poses):
-        entry = pose_to_tum_entry(pose, scale)
+        entry = pose_to_tum_entry(pose)
 
         if timestamps and i < len(timestamps):
             entry = TUMEntry(
@@ -88,6 +87,5 @@ def export_tum(
 def export_trajectory_tum(
     trajectory: list[dict[str, Any]],
     path: Path,
-    scale: float = 1.0
 ) -> None:
-    export_tum(trajectory, path, scale=scale)
+    export_tum(trajectory, path)

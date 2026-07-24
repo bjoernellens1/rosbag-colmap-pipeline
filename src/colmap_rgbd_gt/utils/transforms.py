@@ -19,9 +19,7 @@ class Transform:
         return cls(rotation=rotation, translation=translation)
 
     @classmethod
-    def from_quaternion_translation(
-        cls, q: np.ndarray, t: np.ndarray
-    ) -> "Transform":
+    def from_quaternion_translation(cls, q: np.ndarray, t: np.ndarray) -> "Transform":
         rotation = quaternion_to_rotation_matrix(q)
         return cls(rotation=rotation, translation=t)
 
@@ -77,18 +75,32 @@ def rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
 
 
 def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
-    if q.shape[0] == 4:
-        x, y, z, w = q
-    else:
-        w, x, y, z = q[0], q[1], q[2], q[3]
+    """
+    Convert a quaternion to a rotation matrix.
+
+    Uses COLMAP's native wxyz format (the only convention every caller in
+    this codebase actually passes). A quaternion's components can't be
+    disambiguated by length alone (wxyz and xyzw are both length-4), so
+    there is exactly one supported input order.
+
+    Args:
+        q: Quaternion vector [w, x, y, z] (COLMAP convention).
+
+    Returns:
+        Rotation matrix (3x3).
+    """
+    w, x, y, z = q[0], q[1], q[2], q[3]
     norm = np.sqrt(w * w + x * x + y * y + z * z)
     w, x, y, z = w / norm, x / norm, y / norm, z / norm
 
-    R = np.array([
-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y],
-        [2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x],
-        [2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x*x - 2*y*y]
-    ], dtype=np.float64)
+    R = np.array(
+        [
+            [1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * w * z, 2 * x * z + 2 * w * y],
+            [2 * x * y + 2 * w * z, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * w * x],
+            [2 * x * z - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y],
+        ],
+        dtype=np.float64,
+    )
     return R
 
 
@@ -97,10 +109,42 @@ def normalize_rotation(R: np.ndarray) -> np.ndarray:
     return U @ Vt
 
 
+def colmap_quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
+    """
+    Convert COLMAP's wxyz quaternion to a rotation matrix.
+
+    `quaternion_to_rotation_matrix` is already wxyz-native, so this is a
+    thin alias kept for call-site readability where the wxyz convention is
+    worth spelling out explicitly.
+
+    Args:
+        q: Quaternion vector in COLMAP's wxyz format.
+
+    Returns:
+        Rotation matrix (3x3).
+    """
+    return quaternion_to_rotation_matrix(q)
+
+
 def colmap_pose_to_c2w(qvec: np.ndarray, tvec: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convert COLMAP's wxyz quaternion format to camera-to-world SE3 coordinates.
+
+    Args:
+        qvec: Quaternion vector in COLMAP's wxyz format.
+        tvec: Translation vector.
+
+    Returns:
+        Tuple of (rotation matrix, translation vector) in camera-to-world coordinates.
+    """
     R = quaternion_to_rotation_matrix(qvec)
+
+    # Convert to camera-to-world rotation matrix
     R_cam = R.T
+
+    # Convert translation to camera-to-world coordinates
     t_cam = -R.T @ tvec
+
     return R_cam, t_cam
 
 

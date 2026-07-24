@@ -1,7 +1,10 @@
 """COLMAP reconstruction utilities."""
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
+
 import numpy as np
 
 from colmap_rgbd_gt.colmap.colmap_io import read_cameras_text, read_images_text, read_points3d_text
@@ -10,8 +13,47 @@ from colmap_rgbd_gt.logging import get_logger
 logger = get_logger(__name__)
 
 
+def ensure_text_model(path: Path, colmap_path: str = "colmap") -> bool:
+    path = Path(path)
+
+    text_files = [path / "cameras.txt", path / "images.txt", path / "points3D.txt"]
+    if all(file.exists() for file in text_files):
+        return True
+
+    binary_files = [path / "cameras.bin", path / "images.bin", path / "points3D.bin"]
+    if not all(file.exists() for file in binary_files):
+        return False
+
+    colmap_exe = shutil.which(colmap_path)
+    if colmap_exe is None:
+        logger.error("COLMAP not found in PATH, cannot convert sparse model to text")
+        return False
+
+    logger.info("Converting COLMAP sparse model from binary to text in %s", path)
+    result = subprocess.run(
+        [
+            colmap_exe,
+            "model_converter",
+            "--input_path",
+            str(path),
+            "--output_path",
+            str(path),
+            "--output_type",
+            "TXT",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.error("COLMAP model conversion failed: %s", result.stderr.strip())
+        return False
+
+    return all(file.exists() for file in text_files)
+
+
 def load_sparse_model(path: Path) -> dict[str, Any]:
     path = Path(path)
+    ensure_text_model(path)
 
     cameras = read_cameras_text(path / "cameras.txt")
     images = read_images_text(path / "images.txt")

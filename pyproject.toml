@@ -36,6 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+depth-ba = [
+    "kornia-rs>=0.1.14,<0.2",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
@@ -43,10 +46,11 @@ dev = [
     "ruff>=0.1.0",
     "black>=24.0",
     "isort>=5.13",
+    "kornia-rs>=0.1.14,<0.2",
 ]
 
 [project.scripts]
-gttool = "colmap_rgbd_gt.cli:main"
+gttool = "colmap_rgbd_gt.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/your-org/colmap-rgbd-gt"

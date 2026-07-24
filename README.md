@@ -60,8 +60,31 @@ Output: `data/workspaces/session01/outputs/trajectory_metric_tum.txt`
 | `gttool extract <bag>` | Extract RGB/depth/camera info |
 | `gttool run-colmap <workspace>` | Run COLMAP reconstruction |
 | `gttool scale-depth <workspace>` | Estimate metric scale |
+| `gttool depth-ba <workspace>` | Depth-aware bundle adjustment (optional, requires `[depth-ba]` extra) |
 | `gttool export-tum <workspace>` | Export TUM trajectory |
-| `gttool full <bag>` | Run complete pipeline |
+| `gttool full <bag>` | Run complete pipeline (`--depth-ba` to include bundle adjustment) |
+
+### Depth-Aware Bundle Adjustment (optional)
+
+Beyond post-hoc scale correction, `depth-ba` jointly refines camera poses and
+sparse structure against both reprojection error and metric depth
+measurements, using [`kornia-rs`](https://github.com/kornia/kornia-rs)'s
+Schur-complement bundle adjuster. It runs after `scale-depth` (which supplies
+a roughly-metric initialization) and is CPU-only.
+
+```bash
+pip install -e ".[depth-ba]"
+gttool depth-ba data/workspaces/session01
+# or as part of the full pipeline:
+gttool full data/raw/session01.bag --config configs/default.yaml --depth-ba
+```
+
+Outputs: a refined sparse model under `colmap/sparse/0_refined/`,
+`outputs/trajectory_depth_ba_tum.txt`, and `outputs/depth_ba_report.json`
+(convergence status, observation counts).
+
+This is an experimental, opt-in stage — `kornia-rs`'s bundle-adjustment
+module is young, so it is not part of the default pipeline.
 
 ### Topic Overrides
 
@@ -169,6 +192,19 @@ timestamp tx ty tz qx qy qz qw
 Additional columns: frame_id, rotation matrix, camera center
 
 ## Evaluation with evo
+
+`trajectory_metric_tum.txt` is already metric (a scale factor was applied during the
+`scale-depth` step). Evaluate it with rigid SE(3) alignment only — do **not** pass
+`--correct_scale`, since that would silently re-optimize scale during evaluation and
+mask a broken scale estimate:
+
+```bash
+evo_ape tum groundtruth.txt trajectory_metric_tum.txt -va --align
+```
+
+To separately quantify how far off the recovered scale was, run the same comparison
+a second time with `--correct_scale` and compare the reported scale correction factor
+against 1.0 (`|reported_scale_correction - 1.0|` is the scale error):
 
 ```bash
 evo_ape tum groundtruth.txt trajectory_metric_tum.txt -va --align --correct_scale

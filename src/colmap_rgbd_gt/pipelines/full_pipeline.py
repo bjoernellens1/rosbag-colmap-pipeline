@@ -45,12 +45,26 @@ def full_pipeline(
         logger.error("COLMAP stage failed")
         return False
 
+    depth_ba_enabled = config.get("depth_ba", {}).get("enabled", False)
+    total_stages = 4 if depth_ba_enabled else 3
+
     logger.info("=" * 60)
-    logger.info("Stage 3/3: Scale Estimation")
+    logger.info(f"Stage 3/{total_stages}: Scale Estimation")
     logger.info("=" * 60)
     if not scale_pipeline(workspace, config):
         logger.error("Scale estimation stage failed")
         return False
+
+    if depth_ba_enabled:
+        logger.info("=" * 60)
+        logger.info(f"Stage 4/{total_stages}: Depth-Aware Bundle Adjustment")
+        logger.info("=" * 60)
+        from colmap_rgbd_gt.pipelines.depth_ba_pipeline import depth_ba_pipeline
+        if not depth_ba_pipeline(workspace, config):
+            logger.warning(
+                "Depth BA stage failed; keeping scale-only trajectory as the "
+                "pipeline's final output"
+            )
 
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
