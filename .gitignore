@@ -48,6 +48,8 @@ dmypy.json
 # Data directories
 data/raw/
 data/workspaces/
+/workspaces/
+docker/workspaces/
 data/samples/*.bag
 data/samples/*.db3
 *.bag
