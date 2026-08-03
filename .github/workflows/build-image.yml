@@ -1,0 +1,111 @@
+name: Build and Push Docker Image
+
+# Follows this project ecosystem's established convention (see
+# splatograph/.github/workflows/build-image.yml): push-to-main trigger
+# restricted to paths that actually affect the image, workflow_dispatch for
+# manual runs, docker/login-action + GITHUB_TOKEN for ghcr.io auth (no
+# personal credentials needed), docker/metadata-action for tags (including a
+# git-sha tag for provenance -- CLAUDE.md's satellite-checkout-drift
+# detection in the sibling splatograph project depends on exactly this kind
+# of commit provenance being embedded in images), and registry-based
+# docker/build-push-action caching so a from-source COLMAP rebuild (~15-25
+# min uncached, see docker/Dockerfile) doesn't become a 20+ minute CI run on
+# every trivial change.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-image.yml"
+      - "docker/Dockerfile"
+      - "pyproject.toml"
+      - "requirements/**"
+      - "configs/**"
+      - "src/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-image.yml"
+      - "docker/Dockerfile"
+      - "pyproject.toml"
+      - "requirements/**"
+      - "configs/**"
+      - "src/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: bjoernellens1/colmap-rgbd-gt
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      # The from-source COLMAP build (docker/Dockerfile) plus its
+      # FetchContent-vendored PoseLib/faiss/onnxruntime deps produce a large
+      # image (~31GB locally); GitHub-hosted runners' default ~14GB free
+      # disk isn't enough headroom for a from-scratch build without this.
+      - name: Maximize build disk space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 1024
+          temp-reserve-mb: 100
+          swap-size-mb: 1024
+          build-mount-path: /var/lib/docker
+          build-mount-path-ownership: root:root
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Restart docker with the new data root
+        run: |
+          sudo systemctl start docker
+          sudo systemctl start docker.socket
+          sudo docker info | head -20
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          # Match the local manual-build convention (see docker/Dockerfile's
+          # COLMAP_BUILD_JOBS comment) -- GitHub-hosted ubuntu-latest runners
+          # have 4 cores, so this is mostly documentation here, but keeps CI
+          # and local builds using the same override mechanism rather than
+          # two divergent ways to control build parallelism.
+          build-args: |
+            COLMAP_BUILD_JOBS=4
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max

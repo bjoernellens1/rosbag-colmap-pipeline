@@ -1,0 +1,55 @@
+site_name: COLMAP RGBD GT
+site_description: Docker-based pipeline for converting rosbag recordings to metric pseudo-ground-truth trajectories using COLMAP and depth-based scaling
+site_url: https://bjoernellens1.github.io/rosbag-colmap-pipeline
+repo_url: https://github.com/bjoernellens1/rosbag-colmap-pipeline
+repo_name: bjoernellens1/rosbag-colmap-pipeline
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - toc.integrate
+    - content.code.copy
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage:
+    - Quick Start: usage.md
+    - CLI Reference: cli-reference.md
+    - Configuration: configuration.md
+  - Mapper Selection (global vs. incremental): mapper-selection.md
+  - Depth-Aware Bundle Adjustment: depth-ba.md
+  - Workspace Structure: workspace-structure.md
+  - Output Formats & Evaluation: output-formats.md
+  - Limitations: limitations.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables
+  - toc:
+      permalink: true
