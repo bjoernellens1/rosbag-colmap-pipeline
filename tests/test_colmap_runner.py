@@ -88,6 +88,43 @@ def test_sequential_matcher_loop_detection_without_vocab_tree_skipped(tmp_path, 
     assert "--SequentialMatching.vocab_tree_path" not in args
 
 
+def test_global_mapper_skip_retriangulation_off_by_default(tmp_path, monkeypatch):
+    """ADDED 2026-08-03: default must be current (retriangulation-on)
+    behavior -- this is an opt-in speed/quality tradeoff flag, not a
+    default flip, until an A/B on depth-ba's usable-observation rate is
+    measured (see runner.py's global_mapper docstring note)."""
+    runner = COLMAPRunner(tmp_path / "ws")
+    captured_args = {}
+
+    def fake_run_command(args, env=None):
+        captured_args["args"] = args
+        return COLMAPResult(success=True, return_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_run_command", fake_run_command)
+    monkeypatch.setattr("colmap_rgbd_gt.colmap.runner.ensure_text_model", lambda *a, **k: True)
+
+    runner.global_mapper({})
+
+    assert "--GlobalMapper.skip_retriangulation" not in captured_args["args"]
+
+
+def test_global_mapper_skip_retriangulation_opt_in(tmp_path, monkeypatch):
+    runner = COLMAPRunner(tmp_path / "ws")
+    captured_args = {}
+
+    def fake_run_command(args, env=None):
+        captured_args["args"] = args
+        return COLMAPResult(success=True, return_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_run_command", fake_run_command)
+    monkeypatch.setattr("colmap_rgbd_gt.colmap.runner.ensure_text_model", lambda *a, **k: True)
+
+    runner.global_mapper({"skip_retriangulation": True})
+
+    args = captured_args["args"]
+    assert args[args.index("--GlobalMapper.skip_retriangulation") + 1] == "1"
+
+
 def test_bundle_adjuster_invalidates_stale_text_model(tmp_path, monkeypatch):
     import colmap_rgbd_gt.colmap.runner as runner_module
 

@@ -358,6 +358,25 @@ class COLMAPRunner:
             "--output_path", str(self.sparse_dir),
         ]
 
+        # ADDED 2026-08-03: investigating floor3's wall-clock cost found the
+        # "Running iterative retriangulation and refinement" phase (AFTER
+        # the Ceres BA solve, which itself completed in well under an hour)
+        # is the actual dominant cost -- 4+ hours and counting at only
+        # ~2-3/32 cores utilized (host otherwise idle), not thread- or
+        # contention-limited, just an inherently low-parallelism phase.
+        # `--GlobalMapper.skip_retriangulation` is a real, exposed COLMAP
+        # flag for it. NOT defaulted on: retriangulation refines the point
+        # cloud/tracks after BA, and depth_ba_pipeline's
+        # build_ba_observations() gates every depth observation against
+        # `colmap_depth` computed FROM that same point cloud -- skipping
+        # retriangulation could plausibly degrade depth-ba's usable-
+        # observation rate, not just save wall-clock time. Needs an A/B
+        # measurement (registration ratio + depth-ba n_depth_observations
+        # with vs without) before ever flipping the default; this config
+        # knob exists so that test can be run without a source patch.
+        if config.get("skip_retriangulation", False):
+            args.extend(["--GlobalMapper.skip_retriangulation", "1"])
+
         logger.info("Running COLMAP global_mapper (GLOMAP-derived global SfM)...")
         result = self._run_command(args)
 
