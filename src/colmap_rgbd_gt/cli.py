@@ -21,6 +21,37 @@ console = Console()
 logger = get_logger(__name__)
 
 
+def _repo_root() -> Path:
+    """Resolve the repository root, independent of the caller's cwd.
+
+    Walks up from this file's location looking for pyproject.toml. Inside
+    the container this lands on /app (where pyproject.toml is COPYed);
+    on a dev checkout it lands on the repo root regardless of what
+    directory `gttool` was invoked from.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    # Fallback: should not normally happen (installed package outside
+    # its source tree with no pyproject.toml alongside) -- last resort
+    # is cwd, which is the old (buggy) behavior.
+    return Path.cwd()
+
+
+def _default_workspace(bag_path: Path) -> Path:
+    """Canonical default workspace location for a given bag.
+
+    Always resolves under <repo_root>/data/workspaces/<bag-stem>,
+    regardless of the invocation cwd or where the bag file itself lives.
+    Previously this defaulted to `bag_path.with_suffix("")`, which put
+    the workspace next to the bag file -- so the same scene could land
+    in different locations depending on cwd/bag path, causing the
+    workspaces/ vs data/workspaces/ split (e.g. `hallway`).
+    """
+    return _repo_root() / "data" / "workspaces" / bag_path.stem
+
+
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
@@ -136,7 +167,7 @@ def extract(
         raise typer.Exit(1)
 
     if workspace is None:
-        workspace = bag_path.with_suffix("")  # Remove extension
+        workspace = _default_workspace(bag_path)
 
     from colmap_rgbd_gt.pipelines.extract_only import extract_pipeline
 
@@ -394,7 +425,7 @@ def full_pipeline(
         raise typer.Exit(1)
 
     if workspace is None:
-        workspace = bag_path.with_suffix("")
+        workspace = _default_workspace(bag_path)
 
     # Load config
     config_dict = {}
