@@ -21,6 +21,7 @@ from colmap_rgbd_gt.utils.transforms import (
     quaternion_to_rotation_matrix,
     colmap_pose_to_c2w,
     get_camera_center,
+    rotation_angle_deg,
 )
 from colmap_rgbd_gt.utils.camera import (
     CameraIntrinsics,
@@ -51,6 +52,7 @@ __all__ = [
     "quaternion_to_rotation_matrix",
     "colmap_pose_to_c2w",
     "get_camera_center",
+    "rotation_angle_deg",
     "CameraIntrinsics",
     "backproject_depth",
     "create_pixel_grid",

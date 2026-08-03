@@ -109,6 +109,19 @@ def normalize_rotation(R: np.ndarray) -> np.ndarray:
     return U @ Vt
 
 
+def rotation_angle_deg(R1: np.ndarray, R2: np.ndarray) -> float:
+    """Geodesic angle (degrees) between two rotation matrices on SO(3), via
+    the relative rotation's axis-angle magnitude: angle = arccos((tr(R_rel)-1)/2)
+    where R_rel = R1^T @ R2. Symmetric convention-agnostic (works the same
+    whether R1/R2 are c2w or w2c, as long as both are the same convention) --
+    used for trajectory smoothness/QC metrics (see export/scene_metadata.py),
+    not for anything convention-sensitive like pose composition."""
+    R_rel = R1.T @ R2
+    cos_angle = (np.trace(R_rel) - 1.0) / 2.0
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_angle)))
+
+
 def colmap_quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
     """
     Convert COLMAP's wxyz quaternion to a rotation matrix.

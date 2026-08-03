@@ -10,6 +10,7 @@ from colmap_rgbd_gt.colmap.pose_extract import extract_trajectory, scale_traject
 from colmap_rgbd_gt.export.tum import export_trajectory_tum
 from colmap_rgbd_gt.export.evo import plot_trajectory
 from colmap_rgbd_gt.export.report import generate_report, save_report
+from colmap_rgbd_gt.export.scene_metadata import compute_scene_metadata, save_scene_metadata
 from colmap_rgbd_gt.dataset.schema import Workspace
 
 logger = get_logger(__name__)
@@ -66,11 +67,23 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     except Exception as e:
         logger.warning(f"Could not plot trajectory: {e}")
 
+    report = None
     try:
         report = generate_report(workspace, scale_estimate, diagnostics)
         save_report(report, ws.layout.outputs / "export_report.json")
     except Exception as e:
         logger.warning(f"Could not generate report: {e}")
+
+    try:
+        scene_metadata = compute_scene_metadata(
+            metric_trajectory,
+            ws.layout.timestamps / "rgb.csv",
+            frame_count=report.frame_count if report else None,
+            registered_count=report.registered_images if report else len(metric_trajectory),
+        )
+        save_scene_metadata(scene_metadata, ws.layout.outputs / "scene_metadata.json")
+    except Exception as e:
+        logger.warning(f"Could not compute scene metadata: {e}")
 
     logger.info(f"Scale pipeline complete: scale={scale_estimate.scale:.6f}")
     return True

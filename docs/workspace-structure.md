@@ -22,8 +22,24 @@ workspace/
 └── outputs/
     ├── trajectory_colmap_unscaled.txt
     ├── trajectory_metric_tum.txt
-    └── scale_report.json
+    ├── scale_report.json
+    ├── export_report.json
+    ├── scene_metadata.json
+    ├── trajectory_depth_ba_tum.txt   # only if depth_ba.enabled
+    └── depth_ba_report.json          # only if depth_ba.enabled
 ```
+
+`scene_metadata.json` is a quick-glance QC summary of the exported GT
+trajectory -- trajectory length, pose count/registration ratio, average/
+max/std camera speed, total/average/max rotation between consecutive
+poses, trajectory bounding-box extent and a coarse AABB volume proxy, and
+a revisit/loop-closure coverage signal -- written automatically by the
+`scale-depth` stage (part of every `gttool full` run) alongside
+`export_report.json`, so it's available for every scene without an extra
+flag or command. See `compute_scene_metadata()` in
+`src/colmap_rgbd_gt/export/scene_metadata.py` for the exact field
+definitions and the bbox-volume proxy's stated limitation (axis-aligned
+bounding box, not a real occupied-space estimate).
 
 ## Default workspace location
 
