@@ -39,10 +39,27 @@ class CameraIntrinsics:
             [0, 0, 1]
         ], dtype=np.float64)
 
-    def to_colmap_str(self) -> str:
+    def to_colmap_str(self, camera_model: str | None = None) -> str:
+        """Build a `--ImageReader.camera_params` value for COLMAP.
+
+        Param count/order must match `camera_model` exactly or COLMAP
+        rejects the flag outright:
+        - PINHOLE: fx fy cx cy (4)
+        - OPENCV:  fx fy cx cy k1 k2 p1 p2 (8) -- ROS `plumb_bob`'s D is
+          [k1, k2, p1, p2, k3]; COLMAP's OPENCV model has no k3 term, so
+          it's dropped here (D[:4]), not truncated blindly to 5.
+        """
+        model = camera_model or self.get_colmap_model()
         params = [self.fx, self.fy, self.cx, self.cy]
-        params.extend(self.distortion_coeffs[:5] if self.distortion_coeffs else [0, 0, 0, 0, 0])
-        return " ".join(map(str, params))
+        if model == "PINHOLE":
+            pass
+        elif model == "OPENCV":
+            coeffs = list(self.distortion_coeffs[:4]) if self.distortion_coeffs else [0.0, 0.0, 0.0, 0.0]
+            coeffs += [0.0] * (4 - len(coeffs))
+            params.extend(coeffs)
+        else:
+            raise ValueError(f"to_colmap_str: unsupported camera_model {model!r}")
+        return ",".join(map(str, params))
 
     def get_colmap_model(self) -> str:
         if not self.distortion_coeffs or all(d == 0 for d in self.distortion_coeffs):

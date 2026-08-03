@@ -126,6 +126,18 @@ class COLMAPRunner:
         use_gpu = config.get("use_gpu", False)
         camera_model = config.get("camera_model", "OPENCV")
         single_camera = config.get("single_camera", True)
+        # FIXED 2026-08-03: real per-recording intrinsics (from the bag's
+        # own camera_info topic, or a hardcoded Femto Bolt/Mega fallback --
+        # see ingest.camera_info.resolve_camera_info) were being extracted
+        # into the workspace manifest but never actually handed to COLMAP.
+        # Without `--ImageReader.camera_params`, COLMAP treats focal length
+        # as unknown-per-camera and self-estimates it during SfM, which is
+        # exactly what triggered "Less than 50% of cameras have prior focal
+        # lengths" on trolley_femto's global_mapper run -- a real
+        # reconstruction-quality hit (weaker reprojection consistency,
+        # which loop-closure/view-graph verification depends on), not just
+        # a cosmetic warning.
+        camera_params = config.get("camera_params")
 
         self.database.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +157,14 @@ class COLMAPRunner:
             # invocation against a real workspace, not assumed.
             "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
         ]
+        if camera_params:
+            args.extend(["--ImageReader.camera_params", camera_params])
+            logger.info(f"Using real camera intrinsics as priors: {camera_params}")
+        else:
+            logger.warning(
+                "No valid camera intrinsics available (bag camera_info missing/invalid "
+                "and no fallback profile) -- COLMAP will self-calibrate focal length"
+            )
 
         logger.info("Running COLMAP feature extraction...")
         result = self._run_command(args)
