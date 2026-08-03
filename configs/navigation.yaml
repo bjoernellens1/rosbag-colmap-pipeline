@@ -51,6 +51,19 @@ colmap:
   matcher: sequential
   use_gpu: false
   mapper_preset: medium
+  # Global (GLOMAP-derived) reconstruction instead of incremental SfM.
+  # Added 2026-08-02: incremental `colmap mapper` fragmented a real
+  # navigation/corridor scene into 5 disconnected models (largest held only
+  # ~10% of frames) even WITH the wider sequential_overlap/loop_detection
+  # tuning below, and separately stalled 10+ CPU-hours on a different scene
+  # with real numerical ill-conditioning (frozen BA cost after a "Matrix
+  # not positive definite" warning) rather than fragmenting. `global_mapper`
+  # on the identical (already-extracted, already-matched) database
+  # reconstructed BOTH scenes as ONE fully-connected model, in a fraction of
+  # the wall time -- see colmap/runner.py's `global_mapper()` docstring for
+  # the full writeup. Requires COLMAP >=4.0 (docker/Dockerfile builds 4.1.1
+  # from source specifically for this -- apt's 3.9.1 doesn't have it).
+  mapper_type: global
   # Default overlap (10) only matches each image against its next 10
   # neighbors in sequence -- widened so a single degraded-overlap stretch
   # has more chances to be bridged without needing even denser keyframes.

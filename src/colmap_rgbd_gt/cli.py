@@ -170,6 +170,7 @@ def extract(
 def run_colmap(
     workspace: Path = typer.Argument(..., help="Path to workspace directory"),
     use_gpu: bool = typer.Option(False, "--gpu", help="Use GPU acceleration (CUDA only)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration YAML file (colmap: section only is used)"),
 ) -> None:
     """
     Run COLMAP reconstruction on extracted RGB frames.
@@ -184,11 +185,28 @@ def run_colmap(
 
     from colmap_rgbd_gt.pipelines.colmap_only import colmap_pipeline
 
-    config = {"colmap": {"use_gpu": use_gpu}}
+    # FIXED 2026-08-02: this command previously hardcoded
+    # `config = {"colmap": {"use_gpu": use_gpu}}`, silently ignoring ANY
+    # colmap: tuning (sequential_overlap, quadratic_overlap, loop_detection,
+    # vocab_tree_path, mapper_preset, etc) even from a workspace that was
+    # itself extracted with a tuned config like configs/navigation.yaml --
+    # so re-running just the COLMAP stage (e.g. after a first attempt
+    # fragmented into disconnected models) silently reverted to COLMAP's own
+    # untuned defaults (overlap=10, no loop detection), reproducing the
+    # exact fragmentation the tuned config exists to prevent. `extract` and
+    # `full` already load --config this way; this command hadn't been kept
+    # in sync with that pattern.
+    config_dict: dict = {}
+    if config and config.exists():
+        import yaml
+        config_dict = yaml.safe_load(config.read_text()) or {}
+    config_dict.setdefault("colmap", {})["use_gpu"] = use_gpu
 
     console.print(f"[cyan]Running COLMAP on: {workspace}[/cyan]")
+    if config:
+        console.print(f"[cyan]Using config: {config}[/cyan]")
 
-    success = colmap_pipeline(workspace, config)
+    success = colmap_pipeline(workspace, config_dict)
 
     if success:
         console.print("[green]✓ COLMAP reconstruction complete[/green]")

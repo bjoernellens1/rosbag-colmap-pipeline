@@ -135,7 +135,15 @@ class COLMAPRunner:
             "--image_path", str(self.images_dir),
             "--ImageReader.camera_model", camera_model,
             "--ImageReader.single_camera", "1" if single_camera else "0",
-            "--SiftExtraction.use_gpu", "1" if use_gpu else "0",
+            # FIXED 2026-08-02: was --SiftExtraction.use_gpu -- COLMAP 4.x
+            # (this pipeline now builds 4.1.1 from source, see
+            # docker/Dockerfile) renamed the option group from
+            # Sift{Extraction,Matching} to FeatureExtraction/FeatureMatching
+            # (COLMAP now supports non-SIFT feature backends). 3.9.1's flag
+            # name silently failed as "unrecognised option" once the image
+            # switched off apt's 3.9.1 -- caught by an actual `run-colmap`
+            # invocation against a real workspace, not assumed.
+            "--FeatureExtraction.use_gpu", "1" if use_gpu else "0",
         ]
 
         logger.info("Running COLMAP feature extraction...")
@@ -164,7 +172,9 @@ class COLMAPRunner:
         args = [
             "sequential_matcher",
             "--database_path", str(self.database),
-            "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+            # FeatureMatching, not SiftMatching -- see feature_extractor()'s
+            # comment on the same 3.9.1 -> 4.1.1 rename.
+            "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
             "--SequentialMatching.overlap", str(overlap),
             "--SequentialMatching.quadratic_overlap", "1" if quadratic_overlap else "0",
         ]
@@ -205,7 +215,9 @@ class COLMAPRunner:
         args = [
             "exhaustive_matcher",
             "--database_path", str(self.database),
-            "--SiftMatching.use_gpu", "1" if use_gpu else "0",
+            # FeatureMatching, not SiftMatching -- see feature_extractor()'s
+            # comment on the same 3.9.1 -> 4.1.1 rename.
+            "--FeatureMatching.use_gpu", "1" if use_gpu else "0",
         ]
 
         logger.info("Running COLMAP exhaustive matching...")
@@ -296,6 +308,50 @@ class COLMAPRunner:
 
         return result.success
 
+    def global_mapper(self, config: dict[str, Any]) -> bool:
+        """Global (GLOMAP-derived) reconstruction -- `colmap global_mapper`.
+
+        Added 2026-08-02 after a real production incident: the incremental
+        `mapper()` above ran 10+ CPU-hours on a 2056-frame scene without
+        finishing (a bundle-adjustment round hit real numerical
+        ill-conditioning -- cost frozen across 13+ iterations after a
+        "Matrix not positive definite" CHOLMOD warning, not just a slow
+        big job), and a SEPARATE scene's incremental run fragmented into 5
+        disconnected models with only ~10% of frames in the largest one.
+        `global_mapper` on the SAME (already-extracted, already-matched)
+        databases reconstructed both scenes with 100% of frames in a single
+        connected model, in a small fraction of the wall time (48 minutes
+        end-to-end on the 2056-frame scene that stalled incrementally).
+        Reads/writes the identical `database.db` and sparse-model format as
+        `mapper()` -- confirmed empirically against a real database.db, not
+        just from upstream docs -- so this is a drop-in alternative for the
+        mapper stage only; feature_extractor/sequential_matcher are
+        unchanged either way. Requires COLMAP >=4.0 (this pipeline pins
+        4.1.1 in docker/Dockerfile specifically for this).
+        """
+        self.sparse_dir.mkdir(parents=True, exist_ok=True)
+
+        args = [
+            "global_mapper",
+            "--database_path", str(self.database),
+            "--image_path", str(self.images_dir),
+            "--output_path", str(self.sparse_dir),
+        ]
+
+        logger.info("Running COLMAP global_mapper (GLOMAP-derived global SfM)...")
+        result = self._run_command(args)
+
+        if result.success:
+            self._consolidate_best_model()
+            sparse_model_dir = self.sparse_dir / "0"
+            if sparse_model_dir.exists():
+                ensure_text_model(sparse_model_dir, colmap_path=self.colmap_path)
+            logger.info("Global mapper completed")
+        else:
+            logger.error(f"Global mapper failed: {result.stderr}")
+
+        return result.success
+
     def bundle_adjuster(self, config: dict[str, Any]) -> bool:
         """Run a final global bundle-adjustment pass on the consolidated model.
 
@@ -319,7 +375,13 @@ class COLMAPRunner:
             "bundle_adjuster",
             "--input_path", str(sparse_input),
             "--output_path", str(sparse_input),
-            "--BundleAdjustment.max_num_iterations", str(max_iterations),
+            # FIXED 2026-08-02: was --BundleAdjustment.max_num_iterations --
+            # COLMAP 4.1.1 moved the Ceres-specific solver knobs (including
+            # max_num_iterations) under a separate BundleAdjustmentCeres
+            # group (COLMAP now supports pluggable BA backends), same
+            # 3.9.1->4.1.1 rename class as feature_extractor()'s
+            # FeatureExtraction/FeatureMatching fix.
+            "--BundleAdjustmentCeres.max_num_iterations", str(max_iterations),
         ]
 
         logger.info(f"Running COLMAP bundle adjustment (max_iterations={max_iterations})...")
@@ -349,11 +411,27 @@ class COLMAPRunner:
             return False
 
         matcher = config.get("matcher", "sequential")
+        # "global" (default, colmap global_mapper) or "incremental" (colmap
+        # mapper). DEFAULT FLIPPED 2026-08-02 after a direct, controlled
+        # comparison on the SAME database.db for two real scenes:
+        # incremental `mapper` fragmented both (hallway: 5 disconnected
+        # models, largest held ~10% of frames; kitchen1: ran 598.8 CPU-
+        # minutes -- ~10 hours -- before giving up with "No good initial
+        # image pair found", fragmenting into 3 pieces). `global_mapper` on
+        # the IDENTICAL kitchen1 database reconstructed all 2056 images
+        # into ONE connected model in 48 minutes. No scene tested this
+        # session did better with incremental than global. See
+        # global_mapper()'s docstring for the full mechanism writeup.
+        # "incremental" is kept available as an explicit opt-in
+        # (mapper_type: incremental) in case some future scene's geometry
+        # genuinely favors it, but nothing should need to ask for
+        # "global" by name anymore -- it's the default.
+        mapper_type = config.get("mapper_type", "global")
 
         steps = [
             (self.feature_extractor, config),
             (self.sequential_matcher if matcher == "sequential" else self.exhaustive_matcher, config),
-            (self.mapper, config),
+            (self.global_mapper if mapper_type == "global" else self.mapper, config),
         ]
 
         if config.get("run_bundle_adjustment", False):

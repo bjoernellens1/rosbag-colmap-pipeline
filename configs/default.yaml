@@ -30,6 +30,13 @@ colmap:
   matcher: sequential
   use_gpu: false
   mapper_preset: medium
+  # global (colmap global_mapper) is also the code-level default
+  # (colmap/runner.py::run_full_pipeline) as of 2026-08-02 -- listed
+  # explicitly here too for visibility. See runner.py's
+  # global_mapper()/run_full_pipeline() comments for the kitchen1/hallway
+  # comparison that motivated the flip. Set to "incremental" to opt back
+  # into colmap mapper for a scene that specifically needs it.
+  mapper_type: global
 
 scaling:
   method: umeyama
