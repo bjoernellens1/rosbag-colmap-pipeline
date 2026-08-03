@@ -1,5 +1,16 @@
 services:
   gttool:
+    # Pull-then-build convention (matches splatograph/splatograph-orbslam3's
+    # compose files in this project's ecosystem): try the pushed registry
+    # image first, only fall back to a local from-source build (`build:`
+    # below, or explicit `docker compose build`/`--build`) if the pull
+    # fails or the image tag isn't resolvable. `pull_policy: missing` means
+    # "pull only if not already present locally" -- avoids re-pulling this
+    # ~31GB image (COLMAP 4.1.1 built from source, see docker/Dockerfile)
+    # on every run once it's cached, while still getting the maintained
+    # image by default instead of silently reusing a stale local build.
+    image: ${COLMAP_RGBD_GT_IMAGE:-ghcr.io/bjoernellens1/colmap-rgbd-gt:latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: docker/Dockerfile
