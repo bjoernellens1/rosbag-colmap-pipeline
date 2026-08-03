@@ -108,7 +108,7 @@ scaling:
   depth_tolerance: 2.0
 
 depth_ba:
-  enabled: false
+  enabled: true
   depth_tolerance: 0.1
   obs_sigma_base: 0.01
   obs_sigma_quadratic: 0.0
