@@ -60,7 +60,29 @@ def full_pipeline(
         logger.info(f"Stage 4/{total_stages}: Depth-Aware Bundle Adjustment")
         logger.info("=" * 60)
         from colmap_rgbd_gt.pipelines.depth_ba_pipeline import depth_ba_pipeline
-        if not depth_ba_pipeline(workspace, config):
+        # FIXED 2026-08-03: kornia_rs's solver can raise (not just return
+        # False) on a genuinely ill-conditioned problem -- e.g. a
+        # "Reduced camera Cholesky failed (likely rank-deficient)"
+        # ValueError, observed on a floor2 rerun whose scale estimation
+        # had degenerated to confidence=0.0 (a separate root cause, fixed
+        # upstream in configs/navigation.yaml's keyframe_selection
+        # wiring). Before this fix, an uncaught exception here crashed
+        # the ENTIRE `full` pipeline with exit 1, discarding the already-
+        # successful scale-only stage's output (export_report.json/
+        # scale_report.json/trajectory_metric_tum.txt) even though the
+        # comment below already documents the intent of falling back to
+        # it gracefully -- that fallback only ever triggered on a `False`
+        # return, never on an exception. depth-ba is explicitly a
+        # best-effort refinement (see optimization/depth_ba.py's own
+        # "young solver, no dedicated upstream tests" docstring note), so
+        # any failure mode here must degrade to the scale-only trajectory,
+        # not take down a pipeline run that had otherwise fully succeeded.
+        try:
+            depth_ba_ok = depth_ba_pipeline(workspace, config)
+        except Exception as e:
+            logger.warning(f"Depth BA stage raised {type(e).__name__}: {e}")
+            depth_ba_ok = False
+        if not depth_ba_ok:
             logger.warning(
                 "Depth BA stage failed; keeping scale-only trajectory as the "
                 "pipeline's final output"
