@@ -22,6 +22,39 @@ a real two-room scene connected only by a weak/missing link, not
 necessarily one wrong segment) is left alone and flagged loudly for
 manual review rather than silently discarding potentially-legitimate
 data.
+
+Spatial-adjacency gating (added 2026-08-03, root-caused on hallway and
+tableware1's manual reviews -- see outputs/pose_outlier_filter.json for
+both scenes): the speed-jump test alone conflates two DIFFERENT physical
+situations that both produce a momentary "implied speed above threshold"
+reading --
+  1. a genuine relocation: the two sides of the jump are also far apart
+     in SPACE (floor2's real case: 7.4m apart), i.e. the trajectory
+     actually teleports to a different place.
+  2. tracking noise / a missed registration / fast-but-real motion: the
+     two sides of the jump are spatially close (tableware1's close-range
+     orbital scan taking a 10-25cm step slightly too fast for the fixed
+     3.0 m/s threshold; hallway's dropped-frame gap and single-frame pose
+     jitter, both landing back within the same small room), i.e. nothing
+     actually relocated, the trajectory just took an oddly-timed step.
+A fixed global speed threshold cannot tell these apart on its own --
+scene (2) is a false positive that a purely temporal/speed-based test
+will always flag, no matter how the threshold is tuned, because the
+"jump" is real in the (distance, time) sense even though it is not a
+real relocation in the (majority-scene-extent) sense. This module now
+gates the jump test on spatial adjacency: before computing the
+majority-ratio auto-resolve, each minority segment produced by the
+speed-jump split is checked against the majority segment's actual point
+cloud (nearest-point distance, not just its two adjacent boundary
+frames, since a folded/looping trajectory can leave the majority
+segment's own points on both sides of a minority segment). A minority
+segment found within `spatial_adjacency_threshold_m` of the majority
+segment is treated as noise-driven over-splitting and MERGED back into
+the kept trajectory (not dropped) before the majority-ratio decision is
+made at all. Only segments that remain spatially far from the majority
+after this pass are ever candidates for dropping -- this is what lets
+floor2's genuine 7.4m relocation still get dropped while tableware1's
+25cm orbital step and hallway's 12cm/1.29m in-room noise no longer do.
 """
 
 from dataclasses import dataclass, field
@@ -35,6 +68,13 @@ logger = get_logger(__name__)
 
 DEFAULT_MAX_PLAUSIBLE_SPEED_MPS = 3.0
 DEFAULT_MIN_MAJORITY_RATIO = 3.0
+# Real-world evidence backing this default (2026-08-03 reviews): genuine
+# relocations found so far are meters apart (floor2: ~7.4m). Noise-driven
+# over-splits found so far are well under a meter (tableware1: 10-25cm;
+# hallway: ~12cm jitter, ~1.29m dropped-frame gap). 2.0m sits between
+# those two clusters -- comparable to "a step or two", well below any
+# observed genuine relocation, well above any observed noise jump.
+DEFAULT_SPATIAL_ADJACENCY_THRESHOLD_M = 2.0
 
 
 @dataclass
@@ -44,6 +84,7 @@ class SegmentFilterResult:
     segments: list[dict[str, Any]] = field(default_factory=list)  # all segments found, for logging
     action_taken: bool = False
     reason: str = ""
+    spatially_merged_frame_ids: list[int] = field(default_factory=list)
 
 
 def _segment_by_speed_jumps(
@@ -76,36 +117,55 @@ def _segment_by_speed_jumps(
     return segments
 
 
+def _min_point_distance(segment_a: list[dict[str, Any]], segment_b: list[dict[str, Any]]) -> float:
+    """Nearest-point distance between two segments' full point sets (not
+    just their two temporally-adjacent boundary frames) -- a folded or
+    looping trajectory can leave the majority segment's own points on
+    both sides of a minority segment in space, even though only one
+    boundary frame pair is temporally adjacent to it."""
+    pts_a = np.asarray([e["t"] for e in segment_a], dtype=np.float64)
+    pts_b = np.asarray([e["t"] for e in segment_b], dtype=np.float64)
+    diffs = pts_a[:, None, :] - pts_b[None, :, :]
+    dists = np.linalg.norm(diffs, axis=-1)
+    return float(dists.min())
+
+
 def filter_disconnected_trajectory_segments(
     trajectory: list[dict[str, Any]],
     frame_id_to_ts_ns: dict[int, int],
     max_plausible_speed_mps: float = DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
     min_majority_ratio: float = DEFAULT_MIN_MAJORITY_RATIO,
+    spatial_adjacency_threshold_m: float = DEFAULT_SPATIAL_ADJACENCY_THRESHOLD_M,
 ) -> SegmentFilterResult:
     """Detect and drop minority trajectory segments that are disconnected
-    from a much larger majority segment by an implausible-speed jump.
+    from a much larger majority segment by an implausible-speed jump AND
+    spatially separated from it by more than `spatial_adjacency_threshold_m`.
 
-    Conservative by design: only acts when exactly the majority segment's
-    frame count is >= `min_majority_ratio` times the SUM of all other
-    segments' frame counts. Otherwise returns the trajectory unchanged
-    with `action_taken=False` and a `reason` explaining why (ambiguous
-    split, or no jump found at all), so an ambiguous case is surfaced for
-    manual review rather than silently resolved either way.
+    Two-stage, conservative by design:
+    1. Partition the trajectory at implausible-speed jumps (as before).
+    2. Spatial-adjacency gate: any minority segment whose nearest point to
+       the majority segment is within `spatial_adjacency_threshold_m` is
+       treated as a noise-driven over-split (fast-but-real motion, a
+       missed-registration gap, single-frame jitter that lands back in
+       the same physical place) and MERGED BACK into the kept trajectory,
+       not dropped -- it never reaches the majority-ratio test at all.
+    3. Only segments that remain spatially far from the majority after
+       step 2 are evaluated by the majority-ratio test: dropped if the
+       majority (now including anything merged in step 2) dominates by
+       >= `min_majority_ratio`, otherwise left untouched and flagged for
+       manual review (ambiguous, comparably-sized split -- could be a
+       real two-room scene connected only by a weak/missing link).
     """
     sorted_traj = sorted(trajectory, key=lambda e: e["frame_id"])
     if not sorted_traj:
         return SegmentFilterResult(filtered_trajectory=[], action_taken=False, reason="empty trajectory")
     segments = _segment_by_speed_jumps(sorted_traj, frame_id_to_ts_ns, max_plausible_speed_mps)
 
-    segments_info = [
-        {
-            "n_frames": len(seg),
-            "frame_id_range": [seg[0]["frame_id"], seg[-1]["frame_id"]],
-        }
-        for seg in segments
-    ]
-
     if len(segments) == 1:
+        segments_info = [{
+            "n_frames": len(segments[0]),
+            "frame_id_range": [segments[0][0]["frame_id"], segments[0][-1]["frame_id"]],
+        }]
         return SegmentFilterResult(
             filtered_trajectory=sorted_traj,
             segments=segments_info,
@@ -115,15 +175,82 @@ def filter_disconnected_trajectory_segments(
 
     sizes = [len(seg) for seg in segments]
     majority_idx = int(np.argmax(sizes))
-    majority_size = sizes[majority_idx]
-    other_size = sum(sizes) - majority_size
+    majority_seg = segments[majority_idx]
 
-    if other_size == 0 or majority_size < min_majority_ratio * other_size:
+    # Spatial-adjacency gate: separate minority segments into "spatially
+    # embedded in the majority's extent" (noise -> merge back) vs
+    # "genuinely spatially separated" (real relocation candidate).
+    merged_segment_idxs: list[int] = []
+    separated_segment_idxs: list[int] = []
+    distances_to_majority: dict[int, float] = {}
+    for i, seg in enumerate(segments):
+        if i == majority_idx:
+            continue
+        d = _min_point_distance(seg, majority_seg)
+        distances_to_majority[i] = d
+        if d <= spatial_adjacency_threshold_m:
+            merged_segment_idxs.append(i)
+        else:
+            separated_segment_idxs.append(i)
+
+    segments_info = [
+        {
+            "n_frames": len(seg),
+            "frame_id_range": [seg[0]["frame_id"], seg[-1]["frame_id"]],
+            **({"min_distance_to_majority_m": round(distances_to_majority[i], 3),
+                "spatially_adjacent_to_majority": i in merged_segment_idxs}
+               if i != majority_idx else {}),
+        }
+        for i, seg in enumerate(segments)
+    ]
+
+    spatially_merged_frame_ids = [
+        e["frame_id"] for i in merged_segment_idxs for e in segments[i]
+    ]
+    if merged_segment_idxs:
         logger.warning(
-            f"pose_outliers: found {len(segments)} trajectory segments split by an "
-            f"implausible-speed jump (>{max_plausible_speed_mps} m/s), but the largest "
-            f"({majority_size} frames) is not dominant enough over the rest ({other_size} "
-            f"frames, ratio {majority_size / max(1, other_size):.1f}x < required "
+            f"pose_outliers: {len(merged_segment_idxs)} of {len(segments) - 1} minority "
+            f"segment(s) are within {spatial_adjacency_threshold_m}m of the majority "
+            f"segment's own points (spatially embedded, not a real relocation) -- merging "
+            f"back into the kept trajectory instead of treating as split candidates. "
+            f"Merged frame_ids: {spatially_merged_frame_ids}. Distances: "
+            f"{ {i: round(distances_to_majority[i], 3) for i in merged_segment_idxs} }"
+        )
+
+    # Everything not spatially separated is now part of the effective
+    # majority for the ratio test.
+    combined_majority = list(majority_seg)
+    for i in merged_segment_idxs:
+        combined_majority.extend(segments[i])
+    combined_majority_size = len(combined_majority)
+
+    if not separated_segment_idxs:
+        # No genuinely separated segment remains after spatial merging --
+        # this is one continuous scene over-split by speed-jump noise.
+        return SegmentFilterResult(
+            filtered_trajectory=sorted_traj,
+            segments=segments_info,
+            action_taken=False,
+            reason=(
+                f"{len(segments)} segments found by speed-jump test, but all "
+                f"{len(merged_segment_idxs)} minority segment(s) are spatially adjacent "
+                f"(<= {spatial_adjacency_threshold_m}m) to the majority segment -- treated "
+                f"as noise-driven over-split (fast-but-real motion / registration gap / "
+                f"jitter), not a real relocation. Trajectory kept intact."
+            ),
+            spatially_merged_frame_ids=spatially_merged_frame_ids,
+        )
+
+    other_size = sum(len(segments[i]) for i in separated_segment_idxs)
+
+    if other_size == 0 or combined_majority_size < min_majority_ratio * other_size:
+        logger.warning(
+            f"pose_outliers: after spatial-adjacency merging, {len(separated_segment_idxs)} "
+            f"genuinely spatially-separated segment(s) remain split from the "
+            f"{combined_majority_size}-frame effective majority by an implausible-speed "
+            f"jump (>{max_plausible_speed_mps} m/s AND >{spatial_adjacency_threshold_m}m), "
+            f"but not dominant enough over them ({other_size} frames, ratio "
+            f"{combined_majority_size / max(1, other_size):.1f}x < required "
             f"{min_majority_ratio}x) to auto-resolve. Leaving trajectory UNCHANGED -- "
             f"segments: {segments_info}. Needs manual review."
         )
@@ -132,27 +259,36 @@ def filter_disconnected_trajectory_segments(
             segments=segments_info,
             action_taken=False,
             reason=(
-                f"{len(segments)} segments found but not dominant enough to auto-resolve "
-                f"(largest {majority_size} vs rest {other_size}, need {min_majority_ratio}x)"
+                f"{len(separated_segment_idxs)} spatially-separated segment(s) found (after "
+                f"merging {len(merged_segment_idxs)} spatially-adjacent segment(s) back) but "
+                f"not dominant enough to auto-resolve (effective majority "
+                f"{combined_majority_size} vs rest {other_size}, need {min_majority_ratio}x)"
             ),
+            spatially_merged_frame_ids=spatially_merged_frame_ids,
         )
 
     dropped_frame_ids = [
-        e["frame_id"] for i, seg in enumerate(segments) if i != majority_idx for e in seg
+        e["frame_id"] for i in separated_segment_idxs for e in segments[i]
     ]
     logger.warning(
-        f"pose_outliers: dropping {other_size} frame(s) in {len(segments) - 1} minority "
-        f"segment(s) disconnected from the {majority_size}-frame majority segment by an "
-        f"implausible-speed jump (>{max_plausible_speed_mps} m/s) -- dropped frame_ids: "
-        f"{dropped_frame_ids}. Segments: {segments_info}"
+        f"pose_outliers: dropping {other_size} frame(s) in {len(separated_segment_idxs)} "
+        f"spatially-separated minority segment(s) disconnected from the "
+        f"{combined_majority_size}-frame effective majority segment by an implausible-speed "
+        f"jump (>{max_plausible_speed_mps} m/s AND >{spatial_adjacency_threshold_m}m) -- "
+        f"dropped frame_ids: {dropped_frame_ids}. Segments: {segments_info}"
     )
+    combined_majority.sort(key=lambda e: e["frame_id"])
     return SegmentFilterResult(
-        filtered_trajectory=list(segments[majority_idx]),
+        filtered_trajectory=combined_majority,
         dropped_frame_ids=dropped_frame_ids,
         segments=segments_info,
         action_taken=True,
         reason=(
-            f"dropped {other_size} frame(s) in minority segment(s), kept {majority_size}-frame "
-            f"majority (ratio {majority_size / max(1, other_size):.1f}x >= {min_majority_ratio}x)"
+            f"dropped {other_size} frame(s) in spatially-separated minority segment(s), kept "
+            f"{combined_majority_size}-frame effective majority (ratio "
+            f"{combined_majority_size / max(1, other_size):.1f}x >= {min_majority_ratio}x); "
+            f"also merged {len(merged_segment_idxs)} spatially-adjacent segment(s) "
+            f"({len(spatially_merged_frame_ids)} frame(s)) back into the kept trajectory"
         ),
+        spatially_merged_frame_ids=spatially_merged_frame_ids,
     )
