@@ -137,7 +137,7 @@ def test_bundle_adjuster_passes_max_iterations(tmp_path, monkeypatch):
     runner.bundle_adjuster({"bundle_adjustment_max_iterations": 250})
 
     args = captured_args["args"]
-    assert args[args.index("--BundleAdjustment.max_num_iterations") + 1] == "250"
+    assert args[args.index("--BundleAdjustmentCeres.max_num_iterations") + 1] == "250"
 
 
 def test_count_registered_images_from_binary(tmp_path):
