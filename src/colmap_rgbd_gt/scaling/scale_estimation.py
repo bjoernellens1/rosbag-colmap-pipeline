@@ -290,6 +290,7 @@ def estimate_global_scale(
         h, w = depth.shape
         u, v = uv[:, 0], uv[:, 1]
         in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        frame_coarse_scale = None
         if np.any(in_bounds):
             ui = u[in_bounds].astype(int)
             vi = v[in_bounds].astype(int)
@@ -297,19 +298,43 @@ def estimate_global_scale(
             d_proj = depths_proj[in_bounds]
             nonzero = d_meas > 0
             if np.any(nonzero):
-                coarse_ratios.extend((d_meas[nonzero] / d_proj[nonzero]).tolist())
+                frame_ratios = (d_meas[nonzero] / d_proj[nonzero]).tolist()
+                coarse_ratios.extend(frame_ratios)
+                # Per-frame local ratio, used below to gate this frame's own
+                # tolerance-check rather than a single pooled/global ratio --
+                # see note above the loop this feeds into for why.
+                frame_coarse_scale = float(np.median(frame_ratios))
 
-        frame_cache.append((colmap_pts_all[valid_idx], uv, depths_proj, depth, entry))
+        frame_cache.append((colmap_pts_all[valid_idx], uv, depths_proj, depth, entry, frame_coarse_scale))
 
     coarse_scale = float(np.median(coarse_ratios)) if coarse_ratios else 1.0
     logger.info(f"Coarse pre-scale estimate for correspondence matching: {coarse_scale:.4f}")
 
-    for colmap_pts_valid, uv, depths_proj, depth, entry in frame_cache:
+    # NOTE (2026-08-03): gating every frame's tolerance check against one
+    # single pooled `coarse_scale` assumes the whole trajectory shares one
+    # COLMAP-to-metric ratio. That assumption broke on trolley_femto's
+    # global_mapper reconstruction, which has an internal ~4x scale jump
+    # between two weakly-connected trajectory segments (frames ~0-281 ratio
+    # ~0.83, frames ~357+ ratio ~3.23) -- a real reconstruction-quality
+    # defect (likely global positioning drift across a weak-overlap
+    # boundary), not a scale-estimation bug per se. Gating each frame
+    # against its OWN locally-estimated ratio (falling back to the pooled
+    # value only when a frame has no usable in-bounds ratio of its own)
+    # restores correspondences within each locally-consistent segment
+    # instead of silently zeroing everything against a global value that
+    # fits neither segment. The final scale/confidence computed below is
+    # still a single global number pooled across all matched points, so a
+    # low inlier_ratio/confidence on a reconstruction like this is now a
+    # correct signal of real internal scale drift -- investigate the
+    # reconstruction (e.g. via `colmap model_analyzer` / per-segment
+    # scale checks) rather than trusting the single scale blindly.
+    for colmap_pts_valid, uv, depths_proj, depth, entry, frame_coarse_scale in frame_cache:
+        local_scale = frame_coarse_scale if frame_coarse_scale is not None else coarse_scale
         depth_pts_cam, colmap_pts_matched = find_valid_correspondences(
             depth,
             colmap_pts_valid,
             uv,
-            depths_proj * coarse_scale,
+            depths_proj * local_scale,
             intrinsics,
             depth_tolerance=config.get("depth_tolerance", 0.1),
         )
