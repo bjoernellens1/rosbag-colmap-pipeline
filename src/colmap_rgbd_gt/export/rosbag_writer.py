@@ -3,8 +3,12 @@ GT trajectory, so downstream consumers can work from one self-contained bag
 instead of the original bag plus a separate TUM file.
 
 Every original message is copied verbatim (raw serialized bytes, no
-decode/re-encode) to avoid any risk of altering source data. Two new
-topics are added:
+decode/re-encode) to avoid any risk of altering source data. Original
+per-topic QoS profiles are also carried through unchanged (see
+`add_connection`'s `offered_qos_profiles=conn.ext.offered_qos_profiles`
+below) -- rosbags' reader already parses these from the source bag's
+metadata.yaml, they just weren't being threaded into the new connections.
+Two new topics are added:
 
 - A `geometry_msgs/msg/PoseStamped` per registered frame, at that frame's
   *original* capture timestamp (looked up from the extraction-time
@@ -14,6 +18,30 @@ topics are added:
 - A single `nav_msgs/msg/Path` summary message (all poses in one message),
   stamped at the last pose's time -- for direct visualization in
   rviz2/foxglove without needing per-message playback.
+
+RENAMED 2026-08-03: `pose_topic` now defaults to `/gt/colmap_pose`
+(previously the generic `/gt/pose`), to unambiguously signal on inspection
+(`ros2 bag info`) that this is an OFFLINE, batch-optimized COLMAP/
+global_mapper-derived ground-truth trajectory -- NOT the same thing as
+`/camera_pose`, which is reserved project-wide for LIVE SLAM output
+(ORB-SLAM3 etc, see splatograph's `arguments/__init__.py:122-123`
+`--orbbec_pose_topic` default). Consuming this bag's GT trajectory in
+splatograph is an explicit `--orbbec_pose_topic /gt/colmap_pose` override
+at launch time, by design -- splatograph's own default is deliberately
+left pointed at `/camera_pose` for live/causal SLAM sources, not silently
+repointed at this offline GT topic.
+
+Convention verified end-to-end, not just via docstring: splatograph's
+`/camera_pose` consumer (`streaming_frames.py`'s PoseStamped decode,
+pose_source="camera_pose" path) builds `c2w` directly from `msg.pose.
+position`/`msg.pose.orientation` with NO inversion applied -- i.e. it
+expects the message's pose to already BE camera-to-world, whatever topic
+name it's pointed at via `--orbbec_pose_topic`. `_pose_stamped` below
+writes `entry["t"]`/`entry["R"]` (already c2w, from `colmap_pose_to_c2w`
+via `extract_trajectory`/`scale_trajectory`) directly into `position`/
+`orientation`, also with no inversion -- conventions match, so this
+topic's messages decode correctly under an `--orbbec_pose_topic
+/gt/colmap_pose` override.
 """
 
 import csv
@@ -46,7 +74,7 @@ def write_processed_bag(
     trajectory: list[dict[str, Any]],
     rgb_csv_path: Path,
     output_bag_path: Path,
-    pose_topic: str = "/gt/pose",
+    pose_topic: str = "/gt/colmap_pose",
     path_topic: str = "/gt/path",
     frame_id: str = "map",
     storage_plugin: StoragePlugin = StoragePlugin.MCAP,
@@ -129,10 +157,24 @@ def write_processed_bag(
             # vendor's own msgs package) that a generic typestore has
             # never heard of and can't generate a definition for, which
             # would otherwise raise TypesysError and abort the whole copy.
+            # FIXED 2026-08-03: the original per-topic QoS profiles
+            # (reliability, durability, history depth, etc, as recorded in
+            # the source bag's metadata.yaml) were being silently dropped
+            # here -- ReaderV2 already parses them into
+            # `conn.ext.offered_qos_profiles`, but neither add_connection()
+            # call below was passing them through, so every copied topic
+            # fell back to rosbags' Writer default QoS instead of the
+            # recording's actual one. A downstream reliable-QoS subscriber
+            # (e.g. rvizsplat, per this project's
+            # rvizsplat-tile-ser-is-reliable-backpressure precedent) could
+            # silently fail to connect to a topic that was actually
+            # best-effort in the original recording, or vice versa.
+            qos = getattr(conn.ext, "offered_qos_profiles", None) or ()
             if conn.digest:
                 conn_map[conn.id] = writer.add_connection(
                     conn.topic, conn.msgtype,
                     msgdef=conn.msgdef.data, rihs01=conn.digest,
+                    offered_qos_profiles=qos,
                 )
             else:
                 # Some source bags (older recordings, or ones written
@@ -150,6 +192,7 @@ def write_processed_bag(
                     typestore.register(types)
                 conn_map[conn.id] = writer.add_connection(
                     conn.topic, conn.msgtype, typestore=typestore,
+                    offered_qos_profiles=qos,
                 )
 
         pose_conn = writer.add_connection(pose_topic, PoseStamped.__msgtype__, typestore=typestore)

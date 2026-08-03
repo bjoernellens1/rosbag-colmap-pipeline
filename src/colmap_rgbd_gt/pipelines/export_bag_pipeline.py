@@ -64,7 +64,7 @@ def export_bag_pipeline(
         metric_trajectory,
         ws.layout.timestamps / "rgb.csv",
         output_path,
-        pose_topic=export_config.get("pose_topic", "/gt/pose"),
+        pose_topic=export_config.get("pose_topic", "/gt/colmap_pose"),
         path_topic=export_config.get("path_topic", "/gt/path"),
         frame_id=export_config.get("frame_id", "map"),
     )

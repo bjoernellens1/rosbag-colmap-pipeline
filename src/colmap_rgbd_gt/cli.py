@@ -326,7 +326,7 @@ def export_bag(
     bag_path: Path = typer.Argument(..., help="Path to the original rosbag"),
     workspace: Path = typer.Option(..., "--workspace", "-w", help="Path to workspace directory (must have a completed scale-depth run)"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output bag path (default: <bag>_processed alongside the original)"),
-    pose_topic: str = typer.Option("/gt/pose", "--pose-topic", help="Topic for per-frame GT PoseStamped messages"),
+    pose_topic: str = typer.Option("/gt/colmap_pose", "--pose-topic", help="Topic for per-frame GT PoseStamped messages (offline COLMAP-derived GT -- distinct from live-SLAM /camera_pose; splatograph consumes this via --orbbec_pose_topic /gt/colmap_pose)"),
     path_topic: str = typer.Option("/gt/path", "--path-topic", help="Topic for the summary GT nav_msgs/Path message"),
     frame_id: str = typer.Option("map", "--frame-id", help="Frame ID for the GT pose/path headers"),
 ) -> None:
