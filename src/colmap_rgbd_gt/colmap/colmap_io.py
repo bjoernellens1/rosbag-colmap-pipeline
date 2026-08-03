@@ -135,6 +135,21 @@ def write_cameras_text(path: Path, cameras: dict[int, dict[str, Any]]) -> None:
 
 
 def write_images_text(path: Path, images: dict[int, dict[str, Any]]) -> None:
+    """FIXED 2026-08-03: this used to always write a blank POINTS2D line,
+    discarding every image's 2D-3D track data (`xys`/`point3d_ids`, as
+    populated by `read_images_text`). That's harmless for a caller that
+    only needs poses back out (e.g. depth_ba_pipeline's `sparse/0_refined`
+    debug export, never re-read by COLMAP), but produces a genuinely
+    invalid model for any caller needing COLMAP to re-load it: points3D.txt
+    TRACK entries reference (IMAGE_ID, POINT2D_IDX) pairs that are supposed
+    to index into that image's 2D points array -- with it silently emptied
+    here, COLMAP's own parser (`colmap model_converter` et al) crashes with
+    an out-of-range vector access trying to resolve those indices (found
+    via scale_regime_correction.py's real-data round-trip test). Now writes
+    the actual `xys`/`point3d_ids` when present (falls back to the old
+    blank-line behavior only if an image dict genuinely has neither, so
+    existing callers that never populated them are unaffected).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -147,7 +162,17 @@ def write_images_text(path: Path, images: dict[int, dict[str, Any]]) -> None:
             tvec = img["tvec"]
             f.write(f"{img['image_id']} {qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} ")
             f.write(f"{tvec[0]} {tvec[1]} {tvec[2]} {img['camera_id']} {img['name']}\n")
-            f.write("\n")
+
+            xys = img.get("xys")
+            point3d_ids = img.get("point3d_ids")
+            if xys is not None and point3d_ids is not None and len(xys) > 0:
+                parts = [
+                    f"{x} {y} {pid}"
+                    for (x, y), pid in zip(xys, point3d_ids)
+                ]
+                f.write(" ".join(parts) + "\n")
+            else:
+                f.write("\n")
 
 
 def write_points3d_text(path: Path, points: dict[int, dict[str, Any]]) -> None:

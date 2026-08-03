@@ -65,25 +65,35 @@ def estimate_scale_median(
     )
 
 
-def estimate_scale_umeyama(
-    depth_points: np.ndarray,
-    colmap_points: np.ndarray
-) -> ScaleEstimate:
-    """Estimate the similarity transform mapping COLMAP points to metric
-    depth points: depth ~= scale * R @ colmap + t.
+@dataclass
+class SimilarityEstimate:
+    """Full Sim(3): metric_point ~= scale * R @ colmap_point + t. Used by
+    colmap.scale_regime_correction to actually rewrite a reconstruction's
+    points/poses (scalar-only `ScaleEstimate` isn't enough there -- see
+    that module's docstring for why: two weakly-connected regions of the
+    same reconstruction can end up related by a genuine rigid+scale
+    transform, not just a scale factor, once retriangulation has settled
+    into two different local optima)."""
+    scale: float
+    R: np.ndarray
+    t: np.ndarray
+    confidence: float
+    num_samples: int
+    inlier_ratio: float
 
-    `scale` is therefore the multiplier applied to COLMAP-frame quantities
-    to recover metric units, consistent with `estimate_scale_median`/
-    `estimate_scale_ransac` and with how callers apply the result directly
-    to COLMAP-frame translations.
-    """
+
+def estimate_similarity_umeyama(
+    depth_points: np.ndarray,
+    colmap_points: np.ndarray,
+) -> SimilarityEstimate:
+    """Umeyama similarity fit: depth ~= scale * R @ colmap + t. Returns the
+    FULL transform (R, scale, t), not just the scalar scale -- see
+    `estimate_scale_umeyama` (a thin wrapper around this, kept for
+    backward compatibility with existing scalar-scale callers)."""
     if len(depth_points) < 3 or len(colmap_points) < 3:
-        return ScaleEstimate(
-            scale=1.0,
-            confidence=0.0,
-            method="umeyama",
-            num_samples=0,
-            inlier_ratio=0.0,
+        return SimilarityEstimate(
+            scale=1.0, R=np.eye(3), t=np.zeros(3),
+            confidence=0.0, num_samples=0, inlier_ratio=0.0,
         )
 
     depth_mean = np.mean(depth_points, axis=0)
@@ -115,12 +125,32 @@ def estimate_scale_umeyama(
 
     confidence = min(1.0, inlier_ratio * np.sqrt(len(depth_points) / 100))
 
+    return SimilarityEstimate(
+        scale=float(scale), R=R, t=t,
+        confidence=confidence, num_samples=len(depth_points), inlier_ratio=inlier_ratio,
+    )
+
+
+def estimate_scale_umeyama(
+    depth_points: np.ndarray,
+    colmap_points: np.ndarray
+) -> ScaleEstimate:
+    """Estimate the similarity transform mapping COLMAP points to metric
+    depth points: depth ~= scale * R @ colmap + t.
+
+    `scale` is therefore the multiplier applied to COLMAP-frame quantities
+    to recover metric units, consistent with `estimate_scale_median`/
+    `estimate_scale_ransac` and with how callers apply the result directly
+    to COLMAP-frame translations. (Scalar-only wrapper around
+    `estimate_similarity_umeyama` -- use that directly if R/t are needed.)
+    """
+    sim = estimate_similarity_umeyama(depth_points, colmap_points)
     return ScaleEstimate(
-        scale=float(scale),
-        confidence=confidence,
+        scale=sim.scale,
+        confidence=sim.confidence,
         method="umeyama",
-        num_samples=len(depth_points),
-        inlier_ratio=inlier_ratio,
+        num_samples=sim.num_samples,
+        inlier_ratio=sim.inlier_ratio,
     )
 
 

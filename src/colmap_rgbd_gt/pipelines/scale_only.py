@@ -112,6 +112,66 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     except Exception as e:
         logger.warning(f"Could not run disconnected-segment pose filter: {e}")
 
+    # FIXED 2026-08-03: even after the pose-outlier filter above produces
+    # one smooth, continuous camera trajectory, colmap/sparse/0's 3D
+    # POINTS can still carry a DIFFERENT defect: two weakly-connected
+    # regions of the reconstruction settling into two different implicit
+    # scales during retriangulation, even though their camera poses stay
+    # positionally continuous. Root-caused on a real scene (floor2): a
+    # user directly inspecting the raw sparse model saw two visually
+    # distinct, offset "sheets"/a floating slab of points -- the same
+    # physical surface reconstructed twice at inconsistent scale. Verified
+    # `colmap bundle_adjuster` with 300 extra iterations does NOT fix this
+    # (NO_CONVERGENCE, ratio unchanged) -- it's a genuinely stable,
+    # degenerate local minimum from a weak match-graph link, not an
+    # under-iterated one. See colmap/scale_regime_correction.py's module
+    # docstring for the full root-cause writeup and the independent-
+    # per-region-depth-anchoring fix.
+    try:
+        from colmap_rgbd_gt.colmap.scale_regime_correction import correct_scale_regimes
+        regime_result = correct_scale_regimes(workspace, {
+            "camera_fallback_profile": scaling_config.get("camera_fallback_profile"),
+            "colmap_path": config.get("colmap", {}).get("colmap_path", "colmap"),
+        })
+        if regime_result.action_taken:
+            logger.warning(
+                f"Corrected {regime_result.n_segments} internally-inconsistent scale regime(s) "
+                f"in colmap/sparse model: {regime_result.segments}"
+            )
+        try:
+            import json
+            with open(ws.layout.outputs / "scale_regime_correction.json", "w") as f:
+                json.dump({
+                    "action_taken": regime_result.action_taken,
+                    "reason": regime_result.reason,
+                    "n_segments": regime_result.n_segments,
+                    "segments": regime_result.segments,
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save scale_regime_correction.json: {e}")
+
+        if regime_result.action_taken:
+            # The in-memory metric_trajectory was extracted+scaled BEFORE
+            # this correction touched colmap/sparse/0's poses -- it's now
+            # stale relative to the corrected model. Re-extract so the
+            # exported TUM/scene_metadata/depth-ba artifacts stay
+            # consistent with what's actually in the sparse model, not a
+            # pre-correction snapshot.
+            #
+            # IMPORTANT: do NOT re-apply scale_trajectory(..., scale_estimate
+            # .scale) here -- each corrected segment's Sim3 was fit directly
+            # against real depth (estimate_similarity_umeyama(depth_points_
+            # METRIC, colmap_points_RAW)), so colmap/sparse/0's poses are
+            # ALREADY in real metric units after correction. Applying the
+            # earlier (pre-correction, single-global-scale) scale_estimate
+            # on top would double-scale them.
+            refreshed = extract_trajectory(workspace)
+            if refreshed:
+                metric_trajectory = refreshed
+                logger.info("Re-extracted (already-metric) trajectory from colmap/sparse/0 after scale-regime correction")
+    except Exception as e:
+        logger.warning(f"Could not run scale-regime correction: {e}")
+
     metric_tum_path = ws.layout.outputs / "trajectory_metric_tum.txt"
     export_trajectory_tum(metric_trajectory, metric_tum_path)
 
