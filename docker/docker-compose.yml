@@ -14,8 +14,20 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    # FIXED 2026-08-03: was ./workspaces (repo-root-relative), which didn't
+    # match this project's own documented convention -- the README's Quick
+    # Start example (`gttool full data/raw/session01.bag ...`) produces
+    # `data/workspaces/session01/...` by default (CLI's own workspace
+    # default is `bag_path.with_suffix("")`, not a fixed root, but
+    # `data/raw/<bag>` -> `data/workspaces/<bag>` is the convention every
+    # real scene run this project has actually used). The old mount silently
+    # pointed `docker compose run` at a DIFFERENT, empty directory than
+    # where `gttool` invoked directly (without compose) was actually
+    # writing -- real scenes ended up split across both `workspaces/` and
+    # `data/workspaces/` with no principled reason, found and consolidated
+    # into `data/workspaces/` this session.
     volumes:
-      - ./workspaces:/app/workspaces
+      - ./data/workspaces:/app/workspaces
       - /mnt/cps_persistent1_shared/datasets/public:/mnt/datasets/public:ro
     devices:
       - /dev/kfd
@@ -28,8 +40,20 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.dev
+    # FIXED 2026-08-03: was ./workspaces (repo-root-relative), which didn't
+    # match this project's own documented convention -- the README's Quick
+    # Start example (`gttool full data/raw/session01.bag ...`) produces
+    # `data/workspaces/session01/...` by default (CLI's own workspace
+    # default is `bag_path.with_suffix("")`, not a fixed root, but
+    # `data/raw/<bag>` -> `data/workspaces/<bag>` is the convention every
+    # real scene run this project has actually used). The old mount silently
+    # pointed `docker compose run` at a DIFFERENT, empty directory than
+    # where `gttool` invoked directly (without compose) was actually
+    # writing -- real scenes ended up split across both `workspaces/` and
+    # `data/workspaces/` with no principled reason, found and consolidated
+    # into `data/workspaces/` this session.
     volumes:
-      - ./workspaces:/app/workspaces
+      - ./data/workspaces:/app/workspaces
       - /mnt/cps_persistent1_shared/datasets/public:/mnt/datasets/public:ro
     devices:
       - /dev/kfd
