@@ -1,0 +1,75 @@
+bag:
+  path: ""
+  storage_id: auto
+
+# Orbbec Femto Mega/Bolt, as launched by the sibling orbbec-ros2-jazzy-docker
+# driver (ghcr.io/bjoernellens1/orbbec-ros2-jazzy). Topics recorded compressed
+# by default on this project's real scenes (kitchen1, hallway, trolley_femto,
+# workshop1, table1, tableware1, floor2, floor3).
+#
+# Depth topic note: most scenes recorded the RAW (unregistered) depth stream
+# below (`/camera/depth/image_raw/compressed`). `tableware1` specifically was
+# captured with the driver's depth_registration:=true /
+# align_target_stream:=COLOR hardware alignment enabled, so its depth topic
+# is instead the ALIGNED stream:
+#   /camera/aligned_depth_to_color/image_raw/compressed
+# Override `topics.depth` with that path for a bag recorded with hardware
+# depth registration on -- do not assume raw depth is registered to color
+# unless the recording is known to have been made with align_target_stream
+# enabled (see splatograph/CLAUDE.md's "Validated vs unvalidated input
+# sources" section for why this must never be assumed silently). Kept as one
+# profile with a documented override rather than a separate
+# orbbec_aligned.yaml -- everything else (sync tolerances, depth range,
+# colmap/scaling settings) is identical between the two variants, so a
+# second file would just be topics.depth duplicated with drift risk.
+topics:
+  rgb: /camera/color/image_raw/compressed
+  rgb_compressed: /camera/color/image_raw/compressed
+  depth: /camera/depth/image_raw/compressed
+  pointcloud: null
+  camera_info: /camera/color/camera_info
+
+sync:
+  max_rgb_depth_dt_sec: 0.03
+  max_rgb_info_dt_sec: 0.1
+
+images:
+  export_format: png
+  min_frame_stride: 1
+  max_frames: null
+
+depth:
+  unit_scale_to_meters: 0.001
+  min_depth_m: 0.2
+  max_depth_m: 8.0
+  sample_stride: 8
+
+colmap:
+  camera_model: OPENCV
+  single_camera: true
+  matcher: sequential
+  use_gpu: false
+  mapper_preset: medium
+  # See configs/default.yaml -- global is the code-level default too,
+  # listed explicitly here for visibility.
+  mapper_type: global
+
+scaling:
+  method: umeyama
+  max_frames_for_scale: 100
+  min_points_per_frame: 200
+  outlier_rejection: ransac
+  robust_statistic: median
+
+depth_ba:
+  enabled: false
+  depth_tolerance: 0.1
+  obs_sigma_base: 0.01
+  obs_sigma_quadratic: 0.0
+  max_iterations: 50
+  max_frames_for_ba: 100
+
+export:
+  tum: true
+  csv: true
+  json_report: true
