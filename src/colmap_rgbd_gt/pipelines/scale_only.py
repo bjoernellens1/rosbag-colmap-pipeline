@@ -127,6 +127,7 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     # under-iterated one. See colmap/scale_regime_correction.py's module
     # docstring for the full root-cause writeup and the independent-
     # per-region-depth-anchoring fix.
+    regime_result = None
     try:
         from colmap_rgbd_gt.colmap.scale_regime_correction import correct_scale_regimes
         regime_result = correct_scale_regimes(workspace, {
@@ -187,7 +188,15 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         if not sparse_dir_qc.exists():
             sparse_dir_qc = ws.layout.colmap / "sparse"
         from colmap_rgbd_gt.colmap.duplicate_surface_detection import run_duplicate_surface_qc
-        dup_result = run_duplicate_surface_qc(sparse_dir_qc)
+        # This module's thresholds are calibrated in real meters (see its
+        # docstring). colmap/sparse/0 is only already-metric when the
+        # scale-regime correction above actually rewrote it in place;
+        # otherwise it is still in COLMAP's raw/unscaled unit space and
+        # must be rescaled by the scene's own estimated scale factor first
+        # -- found 2026-08-03 on table1, where unscaled candidates read as
+        # a suspicious ~0.7 apart but were really ~9cm apart once scaled.
+        dup_points_scale = 1.0 if (regime_result is not None and regime_result.action_taken) else scale_estimate.scale
+        dup_result = run_duplicate_surface_qc(sparse_dir_qc, points_scale=dup_points_scale)
         if dup_result.detected:
             logger.warning(
                 f"duplicate_surface_detection: {len(dup_result.candidates)} candidate duplicate "

@@ -333,10 +333,31 @@ def detect_duplicate_planar_surfaces(
     return result
 
 
-def run_duplicate_surface_qc(sparse_dir) -> DuplicateSurfaceDetectionResult:
+def run_duplicate_surface_qc(sparse_dir, points_scale: float = 1.0) -> DuplicateSurfaceDetectionResult:
     """Convenience wrapper: reads a COLMAP text-format sparse model
     directly from `sparse_dir` (must contain cameras.txt/images.txt/
     points3D.txt) and runs `detect_duplicate_planar_surfaces` on it.
+
+    All of this module's absolute-unit thresholds (`DEFAULT_MIN_HEIGHT_
+    SEPARATION`, `DEFAULT_MAX_HEIGHT_SEPARATION`, `DEFAULT_MIN_VERTICAL_GAP`,
+    `plane_residual_max`, ...) are calibrated in METERS. `points3D.txt`
+    itself is only in real-world meters when the scene's poses/points
+    have already been rescaled into metric units in-place (e.g. via
+    `scale_regime_correction.correct_scale_regimes` actually taking
+    action -- see that module and the caller in `pipelines/scale_only.py`).
+    For any scene where that did NOT happen, `colmap/sparse/0` is still
+    in COLMAP's arbitrary (SfM-internal, unscaled) unit space, and the
+    thresholds above are silently being compared against the wrong unit
+    -- found 2026-08-03 on table1, where 3 candidates superficially
+    "0.7 apart" were actually ~9cm apart in real meters once the scene's
+    own `scale_report.json` scale factor was applied, once real
+    height-map units and image evidence were checked (all 3 turned out to
+    be scattered/weakly-constrained background points -- plant foliage
+    and a grazing-angle floor/wall boundary line -- not genuine duplicate
+    surfaces; see git history for the table1 writeup). Callers MUST pass
+    `points_scale=scale_estimate.scale` whenever the sparse model being
+    read has NOT been confirmed already-metric, so `height_separation_m`
+    (and every other reported quantity) means what its name says.
     """
     from pathlib import Path
     from colmap_rgbd_gt.colmap.colmap_io import read_cameras_text, read_images_text, read_points3d_text
@@ -347,7 +368,7 @@ def run_duplicate_surface_qc(sparse_dir) -> DuplicateSurfaceDetectionResult:
     points_raw = read_points3d_text(sparse_dir / "points3D.txt")
 
     points = {
-        pid: {"xyz": np.array(p["xyz"], dtype=np.float64), "rgb": p["rgb"]}
+        pid: {"xyz": np.array(p["xyz"], dtype=np.float64) * points_scale, "rgb": p["rgb"]}
         for pid, p in points_raw.items()
     }
     for img in images.values():
