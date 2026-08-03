@@ -260,6 +260,26 @@ def build_ba_observations(
     obs_depths: list[float] = []
     obs_sigmas: list[float] = []
 
+    # FIXED 2026-08-03: comparing raw `colmap_depth` (from the Stage-A-
+    # scaled model) directly against measured depth at `depth_tolerance`
+    # (10% by default) was rejecting ~99.5% of otherwise-valid depth
+    # observations, even on a known-healthy, high-confidence scale result
+    # (verified on floor2: depth_meas/colmap_depth has a tight, systematic
+    # ~1.18x bias -- 5th/95th percentile 1.15/1.23 -- not noise). Stage A's
+    # scale comes from a global umeyama Sim(3) fit that minimizes overall
+    # 3D point-position error; that is a different objective from "agrees
+    # with per-frame Z-depth", so a several-percent systematic depth bias
+    # surviving Stage A is expected, not a Stage-A bug -- but a hard-coded
+    # zero-margin tolerance check downstream then has no way to tell that
+    # bias apart from a real mismatch. This mirrors the same class of issue
+    # already fixed in scaling/scale_estimation.py's correspondence
+    # gathering: gate against a locally-estimated coarse correction instead
+    # of assuming the input is already perfectly calibrated. Per-frame
+    # correction (falling back to a single pooled value for frames with no
+    # samples of their own) also still degrades gracefully on a scene with
+    # internal scale drift (trolley_femto), same as that earlier fix.
+    frame_cache = []
+    coarse_ratios_all = []
     for pose_idx, image_name in enumerate(image_names):
         image_id = get_image_id_by_name(model, image_name)
         if image_id is None:
@@ -292,13 +312,35 @@ def build_ba_observations(
             valid_pixel = np.zeros(len(xys_valid), dtype=bool)
 
         valid_depth = depth_meas > 0
-        depth_diff = np.abs(depth_meas - colmap_depth)
-        valid_assoc = (colmap_depth > 0) & (depth_diff < depth_tolerance * np.abs(colmap_depth))
-        has_depth = valid_pixel & valid_depth & valid_assoc
+        coarse_candidates = valid_pixel & valid_depth & (colmap_depth > 0)
+        frame_correction = None
+        if np.any(coarse_candidates):
+            frame_ratios = (depth_meas[coarse_candidates] / colmap_depth[coarse_candidates]).tolist()
+            coarse_ratios_all.extend(frame_ratios)
+            # A frame-local median needs enough samples to be robust to a
+            # single bad/outlier depth reading (e.g. a genuinely wrong
+            # measurement that the tolerance gate exists to catch) --
+            # below this, a per-frame median could itself be dragged onto
+            # that outlier. Fall back to the global correction, which is
+            # implicitly robust via a much larger pooled sample.
+            _MIN_FRAME_CORRECTION_SAMPLES = 5
+            if len(frame_ratios) >= _MIN_FRAME_CORRECTION_SAMPLES:
+                frame_correction = float(np.median(frame_ratios))
 
         undistorted_uv = undistort_points(xys_valid, intrinsics)
+        frame_cache.append((pose_idx, point_idxs, undistorted_uv, colmap_depth, depth_meas, valid_pixel, valid_depth, frame_correction))
 
-        for i in range(len(xys_valid)):
+    global_correction = float(np.median(coarse_ratios_all)) if coarse_ratios_all else 1.0
+
+    for pose_idx, point_idxs, undistorted_uv, colmap_depth, depth_meas, valid_pixel, valid_depth, frame_correction in frame_cache:
+        correction = frame_correction if frame_correction is not None else global_correction
+        colmap_depth_corrected = colmap_depth * correction
+
+        depth_diff = np.abs(depth_meas - colmap_depth_corrected)
+        valid_assoc = (colmap_depth_corrected > 0) & (depth_diff < depth_tolerance * np.abs(colmap_depth_corrected))
+        has_depth = valid_pixel & valid_depth & valid_assoc
+
+        for i in range(len(undistorted_uv)):
             obs_rows.append([float(pose_idx), float(point_idxs[i]), float(undistorted_uv[i, 0]), float(undistorted_uv[i, 1])])
             if has_depth[i]:
                 d = float(depth_meas[i])
