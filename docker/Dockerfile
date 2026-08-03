@@ -130,5 +130,20 @@ COPY configs/ /app/configs/
 COPY src/ /app/src/
 RUN uv pip install -e ".[depth-ba]"
 
+# GHCR reads org.opencontainers.image.source to auto-link a pushed package
+# to its source repo in the GitHub Packages UI -- without it, a manually
+# `podman push`ed image (or one built by CI without this label) shows up as
+# an orphaned/unlinked package. Matches the convention already used by this
+# ecosystem's other images (splatograph-orbslam3/Dockerfile). Placed at the
+# end (not near FROM) deliberately -- a LABEL this late is its own cheap
+# layer and doesn't invalidate the expensive from-source COLMAP build cache
+# above it. docker/metadata-action@v5 (wired into
+# .github/workflows/build-image.yml) sets this automatically on a CI-built
+# image too, but it's also needed here for a manual `podman
+# build`/`podman push` from a dev machine to get the same linkage.
+LABEL org.opencontainers.image.source="https://github.com/bjoernellens1/rosbag-colmap-pipeline" \
+      org.opencontainers.image.description="Docker-based pipeline for converting rosbag recordings to metric pseudo-ground-truth trajectories using COLMAP and depth-based scaling" \
+      org.opencontainers.image.licenses="MIT"
+
 ENTRYPOINT ["gttool"]
 CMD ["--help"]
