@@ -410,7 +410,7 @@ def full_pipeline(
     rgb_topic: Optional[str] = typer.Option(None, "--rgb", help="RGB topic name"),
     depth_topic: Optional[str] = typer.Option(None, "--depth", help="Depth topic name"),
     camera_info_topic: Optional[str] = typer.Option(None, "--camera-info", help="Camera info topic name"),
-    depth_ba: bool = typer.Option(False, "--depth-ba/--no-depth-ba", help="Run depth-aware bundle adjustment after scale estimation (requires the 'depth-ba' extra)"),
+    depth_ba: Optional[bool] = typer.Option(None, "--depth-ba/--no-depth-ba", help="Run depth-aware bundle adjustment after scale estimation (requires the 'depth-ba' extra). Overrides the config file's depth_ba.enabled; omit to use whatever the config says (default.yaml ships with it enabled)."),
     log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level"),
 ) -> None:
     """
@@ -440,8 +440,8 @@ def full_pipeline(
         config_dict.setdefault("topics", {})["depth"] = depth_topic
     if camera_info_topic:
         config_dict.setdefault("topics", {})["camera_info"] = camera_info_topic
-    if depth_ba:
-        config_dict.setdefault("depth_ba", {})["enabled"] = True
+    if depth_ba is not None:
+        config_dict.setdefault("depth_ba", {})["enabled"] = depth_ba
 
     from colmap_rgbd_gt.pipelines.full_pipeline import full_pipeline as run_full
 

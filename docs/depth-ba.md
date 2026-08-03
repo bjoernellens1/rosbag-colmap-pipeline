@@ -19,18 +19,27 @@ Outputs: a refined sparse model under `colmap/sparse/0_refined/`,
 
 ## Status
 
-This is an experimental, opt-in stage — `kornia-rs`'s bundle-adjustment
-module is young, so it is not part of the default pipeline
-(`depth_ba.enabled: false` in every shipped config). It is covered by unit
-and integration tests (`tests/test_depth_ba_wrapper.py`,
-`tests/test_depth_ba_integration.py`) but as of this writing has not yet
-been exercised end-to-end on real reconstruction data — only mocked
-scenarios. Real-data validation (a real `global_mapper` output run through
-`depth-ba`, compared against the non-depth-ba result on scale confidence,
-reprojection error, and registration ratio) is expected to happen once a
-suitable production workspace (e.g. `trolley_femto`) has a completed
-`global_mapper` reconstruction available. If/when that comparison shows a
-real, measured improvement, `depth_ba.enabled` will flip to `true` as the
-default in `configs/default.yaml` and `configs/navigation.yaml`, following
-the same rigor as the `mapper_type` default flip (see
-[Mapper Selection](mapper-selection.md)) — real numbers, not assumption.
+`depth_ba.enabled: true` is now the default in `configs/default.yaml`,
+backed by a real measured improvement in trajectory accuracy (ATE) on the
+`fr3` TUM-RGBD sequence, following the same real-numbers-before-flipping-
+a-default rigor as the `mapper_type` default (see
+[Mapper Selection](mapper-selection.md)). It is covered by unit and
+integration tests (`tests/test_depth_ba_wrapper.py`,
+`tests/test_depth_ba_integration.py`).
+
+`gttool full` fails soft on this stage: if `depth-ba` raises (e.g. the
+`kornia-rs` extra isn't installed, or the solver doesn't converge for a
+particular scene), the exception is caught and logged rather than crashing
+the whole pipeline run — the non-depth-ba scale-only output
+(`trajectory_metric_tum.txt`) remains valid either way. Pass
+`--no-depth-ba` to `gttool full` to skip the stage outright (e.g. on a
+machine without the `[depth-ba]` extra installed), or `--depth-ba` to force
+it on regardless of what the config file says.
+
+Gating depth observations correctly matters here: `depth-ba` compares each
+observation's measured depth against a *bias-corrected* COLMAP depth
+estimate (not the raw per-point COLMAP depth), and depth-correspondence
+matching for scale estimation itself is now gated per-frame rather than by
+one pooled global ratio — both fixes were needed for scenes where COLMAP's
+own scale drifts meaningfully across the sequence (see
+`scaling/scale_estimation.py` and `optimization/depth_ba.py`).
