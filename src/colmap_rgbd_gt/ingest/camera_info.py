@@ -78,8 +78,8 @@ def get_distortion_coeffs(info: dict) -> np.ndarray:
     return np.array(D) if D else np.zeros(5)
 
 
-# Fallback factory-calibration profiles for the two Orbbec cameras used
-# across this ecosystem's real scenes, for when a bag's own camera_info
+# Fallback factory-calibration profiles for cameras used across this
+# ecosystem's real scenes, for when a bag's own camera_info
 # topic is missing or fails `validate_camera_info`. These are NOT invented:
 # both come from splatograph's own ORB-SLAM3 frontend configs
 # (splatograph-orbslam3-src/config/OrbbecFemto{Bolt,Mega}_RGBD.yaml), which
@@ -111,6 +111,23 @@ KNOWN_CAMERA_PROFILES: dict[str, dict] = {
         "D": [0.07101957, -0.09848151, 0.00043707, 0.00012857, 0.03971413, 0.0, 0.0, 0.0],
         "R": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         "P": [749.820374, 0.0, 640.758850, 0.0, 0.0, 749.719055, 364.850922, 0.0, 0.0, 0.0, 1.0, 0.0],
+        "distortion_model": "plumb_bob",
+        "binning_x": 0,
+        "binning_y": 0,
+    },
+    # RealSense D435i, 1280x720 RGB -- values from this project's own
+    # ros2-jazzy-realsense-fedora repo
+    # (config/pyslam_realsense_d435i.yaml), not invented. Added 2026-08-03
+    # for hallway's bag, whose own camera_info topic published an
+    # unpopulated identity K (see validate_camera_info's implausible-
+    # focal-length check).
+    "realsense_d435i": {
+        "width": 1280,
+        "height": 720,
+        "K": [907.2616, 0.0, 651.042, 0.0, 906.7314, 370.796, 0.0, 0.0, 1.0],
+        "D": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "R": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        "P": [907.2616, 0.0, 651.042, 0.0, 0.0, 906.7314, 370.796, 0.0, 0.0, 0.0, 1.0, 0.0],
         "distortion_model": "plumb_bob",
         "binning_x": 0,
         "binning_y": 0,
