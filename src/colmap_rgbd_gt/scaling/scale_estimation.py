@@ -201,13 +201,24 @@ def estimate_global_scale(
     )
     from colmap_rgbd_gt.scaling.backproject import transform_to_world
     from colmap_rgbd_gt.utils.camera import CameraIntrinsics
+    from colmap_rgbd_gt.ingest.camera_info import resolve_camera_info
 
     ws = Workspace(workspace)
     manifest = Manifest.load(ws.layout.manifest)
 
-    intrinsics_data = manifest.camera_info
+    # FIXED 2026-08-03: this used to trust manifest.camera_info verbatim,
+    # with no validation -- broke completely (0 correspondences) on
+    # hallway's bag, whose camera_info topic published an unpopulated
+    # identity K (fx=fy=1). Route through the same validate-else-fallback
+    # resolution feature_extractor already uses (see colmap_only.py) so a
+    # garbage/implausible bag camera_info doesn't silently poison every
+    # reprojection computation here too.
+    intrinsics_data, intrinsics_source = resolve_camera_info(
+        manifest.camera_info, config.get("camera_fallback_profile")
+    )
     if not intrinsics_data:
-        raise ValueError("No camera info in manifest")
+        raise ValueError("No valid camera info in manifest and no fallback profile configured")
+    logger.info(f"Scale estimation camera intrinsics source: {intrinsics_source}")
 
     intrinsics = CameraIntrinsics(
         fx=intrinsics_data["K"][0],

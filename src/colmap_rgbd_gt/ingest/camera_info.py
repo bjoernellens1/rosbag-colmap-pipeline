@@ -37,6 +37,31 @@ def validate_camera_info(info: dict) -> list[str]:
     else:
         if K[0] <= 0 or K[4] <= 0:
             errors.append(f"Invalid focal length in K: fx={K[0]}, fy={K[4]}")
+        else:
+            # FIXED 2026-08-03: fx=1.0 (or any other tiny positive value)
+            # passed the old `<= 0` check but is obviously not a real
+            # calibration for any real sensor -- found on hallway's bag:
+            # camera_info topic published an identity K ([1,0,0,0,1,0,0,0,1],
+            # a driver stub before real calibration loaded), which this
+            # check let through as "valid", silently breaking every
+            # downstream consumer's reprojection math (scale estimation
+            # got exactly 0 correspondences: "Coarse pre-scale estimate...
+            # 1.0000" / "Insufficient correspondences: 0" -- the telltale
+            # sign of fx=fy=1 poisoning every projected-point computation).
+            # A real lens's focal length in pixels is always a sizeable
+            # fraction of the image dimension it's paired with (rarely
+            # below ~10% for anything from a fisheye to a narrow FoV lens);
+            # anything smaller is not a plausible calibration.
+            width = info.get("width", 0)
+            height = info.get("height", 0)
+            min_plausible_fx = 0.1 * width if width > 0 else 1.0
+            min_plausible_fy = 0.1 * height if height > 0 else 1.0
+            if K[0] < min_plausible_fx or K[4] < min_plausible_fy:
+                errors.append(
+                    f"Implausible focal length in K: fx={K[0]}, fy={K[4]} "
+                    f"for a {width}x{height} image (expected fx >= {min_plausible_fx:.1f}, "
+                    f"fy >= {min_plausible_fy:.1f}) -- likely an unpopulated/stub camera_info"
+                )
         if K[1] != 0 or K[3] != 0:
             errors.append("K matrix should have zero skew")
 

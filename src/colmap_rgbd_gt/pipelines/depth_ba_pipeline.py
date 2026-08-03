@@ -71,10 +71,19 @@ def depth_ba_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         return False
 
     manifest = Manifest.load(ws.layout.manifest)
-    intrinsics_data = manifest.camera_info
+    # FIXED 2026-08-03: same fix as scale_estimation.py -- route through
+    # resolve_camera_info's validate-else-fallback instead of trusting
+    # manifest.camera_info verbatim (would otherwise silently poison the
+    # BA's reprojection/depth math on a bag with a garbage/stub camera_info,
+    # same failure mode found on hallway).
+    from colmap_rgbd_gt.ingest.camera_info import resolve_camera_info
+    intrinsics_data, intrinsics_source = resolve_camera_info(
+        manifest.camera_info, config.get("camera_fallback_profile")
+    )
     if not intrinsics_data:
-        logger.error("No camera info in manifest")
+        logger.error("No valid camera info in manifest and no fallback profile configured")
         return False
+    logger.info(f"depth-ba camera intrinsics source: {intrinsics_source}")
 
     intrinsics = CameraIntrinsics(
         fx=intrinsics_data["K"][0],
