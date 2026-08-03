@@ -172,6 +172,42 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     except Exception as e:
         logger.warning(f"Could not run scale-regime correction: {e}")
 
+    # QC-only (2026-08-03, DETECTION not correction -- see module docstring
+    # in duplicate_surface_detection.py): investigating floor2's reported
+    # "floating slab" after the scale-regime fix above, that specific
+    # cluster turned out to be the REAL corridor floor (confirmed by
+    # color, sensor-depth backprojection, and image-space reprojection),
+    # not a duplicate -- a naive "planar cluster offset in Y" heuristic is
+    # NOT a valid detector, it fires on every healthy floor. This runs the
+    # correctly-gated version (requires a genuine vertical gap AND shared
+    # image-space reprojection footprint between two clusters, not just an
+    # offset) purely for visibility -- it does not modify colmap/sparse/0.
+    try:
+        sparse_dir_qc = ws.layout.colmap / "sparse" / "0"
+        if not sparse_dir_qc.exists():
+            sparse_dir_qc = ws.layout.colmap / "sparse"
+        from colmap_rgbd_gt.colmap.duplicate_surface_detection import run_duplicate_surface_qc
+        dup_result = run_duplicate_surface_qc(sparse_dir_qc)
+        if dup_result.detected:
+            logger.warning(
+                f"duplicate_surface_detection: {len(dup_result.candidates)} candidate duplicate "
+                f"planar-surface pair(s) found in {sparse_dir_qc} -- inspect before trusting this "
+                "scene's point cloud; see duplicate_surface_qc.json"
+            )
+        try:
+            import json
+            with open(ws.layout.outputs / "duplicate_surface_qc.json", "w") as f:
+                json.dump({
+                    "detected": dup_result.detected,
+                    "n_clusters_found": dup_result.n_clusters_found,
+                    "reason": dup_result.reason,
+                    "candidates": dup_result.candidates,
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save duplicate_surface_qc.json: {e}")
+    except Exception as e:
+        logger.warning(f"Could not run duplicate-surface QC: {e}")
+
     metric_tum_path = ws.layout.outputs / "trajectory_metric_tum.txt"
     export_trajectory_tum(metric_trajectory, metric_tum_path)
 
