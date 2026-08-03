@@ -82,6 +82,33 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
                 f"frame(s) from the exported trajectory: {pose_filter_result.dropped_frame_ids}"
             )
             metric_trajectory = pose_filter_result.filtered_trajectory
+
+            # FIXED 2026-08-03: dropping frames from the EXPORTED trajectory
+            # only (trajectory_metric_tum.txt / scene_metadata.json /
+            # depth-ba's inputs) left colmap/sparse/0 itself untouched --
+            # anyone opening the raw sparse model directly in COLMAP's own
+            # GUI (a normal, expected sanity-check workflow) still saw the
+            # original, uncleaned reconstruction with the mis-positioned
+            # minority segment intact. Remove the same frames from the
+            # actual sparse model on disk too, via COLMAP's own
+            # image_deleter (see reconstruction.remove_images_from_sparse_
+            # model's docstring for why this, not a hand-rolled binary
+            # edit), so the raw model matches every exported artifact.
+            sparse_dir = ws.layout.colmap / "sparse" / "0"
+            if not sparse_dir.exists():
+                sparse_dir = ws.layout.colmap / "sparse"
+            image_names_to_delete = [f"{fid:06d}.png" for fid in pose_filter_result.dropped_frame_ids]
+            colmap_path = config.get("colmap", {}).get("colmap_path", "colmap")
+            from colmap_rgbd_gt.colmap.reconstruction import remove_images_from_sparse_model
+            if remove_images_from_sparse_model(sparse_dir, image_names_to_delete, colmap_path=colmap_path):
+                logger.info(f"colmap/sparse model at {sparse_dir} updated to match the filtered trajectory")
+            else:
+                logger.error(
+                    f"Failed to remove dropped frames from the sparse model at {sparse_dir} -- "
+                    "exported trajectory artifacts ARE clean, but the raw COLMAP model still "
+                    "contains the disconnected segment. Investigate before trusting a direct "
+                    "inspection of colmap/sparse/0 for this scene."
+                )
     except Exception as e:
         logger.warning(f"Could not run disconnected-segment pose filter: {e}")
 
