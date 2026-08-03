@@ -41,6 +41,27 @@ flag or command. See `compute_scene_metadata()` in
 definitions and the bbox-volume proxy's stated limitation (axis-aligned
 bounding box, not a real occupied-space estimate).
 
+**Reading `speed.max_mps`/`rotation.max_deg_per_frame`:** both come with
+a `*_step_index`/`*_frame_ids`/`*_is_leading_frames` triple pinpointing
+which pose transition produced the max. This exists because a spike in
+the trajectory's first couple of transitions is a qualitatively different
+(much less concerning) signal than a mid-trajectory one: COLMAP's
+earliest registered poses haven't accumulated much multi-view constraint
+yet and are characteristically less stable, not evidence of a genuine
+tracking glitch or teleport. Confirmed on a real scene (table1,
+2026-08-03): `max_mps` was driven entirely by frames 0->1 (9.499 m/s) and
+1->2 (9.027 m/s) -- everything else in the top-8 speed ranking was
+<=1.16 m/s, consistent with a normal handheld pace. `max_mps_is_leading_
+frames=True`/`max_deg_is_leading_frames=True` flags exactly this pattern
+so a reader doesn't have to manually re-derive it every time; treat
+`is_leading_frames=False` (a spike well past the first couple of frames)
+as the one actually worth investigating. If this leading-frames pattern
+turns out to show up consistently across scenes once re-run with the
+current pipeline, that would confirm it's a general COLMAP-early-
+registration characteristic rather than something scene-specific -- worth
+checking as the other rerun-queue scenes (floor3, tableware1, hallway,
+kitchen1, workshop1) complete.
+
 ## Default workspace location
 
 `gttool extract` and `gttool full` default `--workspace`/`-w` to

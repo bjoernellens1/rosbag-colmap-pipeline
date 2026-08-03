@@ -66,6 +66,12 @@ def test_straight_line_then_turn(tmp_path):
     assert m["rotation"]["total_deg"] == pytest.approx(90.0)
     assert m["rotation"]["avg_deg_per_frame"] == pytest.approx(90.0 / 4)
     assert m["rotation"]["max_deg_per_frame"] == pytest.approx(90.0)
+    # The only real rotation happens at step index 2 (poses 2->3, the
+    # in-place 90-degree turn) -- well past LEADING_STEP_COUNT (2), so this
+    # is correctly NOT flagged as an early-registration artifact.
+    assert m["rotation"]["max_deg_step_index"] == 2
+    assert m["rotation"]["max_deg_frame_ids"] == [2, 3]
+    assert m["rotation"]["max_deg_is_leading_frames"] is False
 
     assert m["extent"]["min_m"] == pytest.approx([0.0, 0.0, 0.0])
     assert m["extent"]["max_m"] == pytest.approx([2.0, 2.0, 0.0])
@@ -77,6 +83,51 @@ def test_straight_line_then_turn(tmp_path):
     # close together.
     assert m["revisit"]["n_revisit_pairs"] == 0
     assert m["revisit"]["revisited_pose_fraction"] == pytest.approx(0.0)
+
+
+def test_leading_frame_speed_spike_is_flagged(tmp_path):
+    """A speed spike in the trajectory's first couple of transitions must
+    be flagged max_mps_is_leading_frames=True -- this is the exact pattern
+    found (and confirmed as an early-COLMAP-registration artifact, not a
+    real tracking glitch) on table1's real scene_metadata.json: frames
+    0->1 and 1->2 at ~9.5/9.0 m/s, everything else <=1.16 m/s."""
+    R_id = np.eye(3)
+    trajectory = [
+        {"frame_id": 0, "R": R_id, "t": np.array([0.0, 0.0, 0.0])},
+        {"frame_id": 1, "R": R_id, "t": np.array([0.33, 0.0, 0.0])},  # fast: leading spike
+        {"frame_id": 2, "R": R_id, "t": np.array([0.34, 0.0, 0.0])},  # normal pace after
+        {"frame_id": 3, "R": R_id, "t": np.array([0.35, 0.0, 0.0])},
+    ]
+    rgb_csv = tmp_path / "rgb.csv"
+    _write_rgb_csv(rgb_csv, [(0, 0.0), (1, 0.035), (2, 1.035), (3, 2.035)])
+
+    m = compute_scene_metadata(trajectory, rgb_csv)
+    assert m["speed"]["max_mps_step_index"] == 0
+    assert m["speed"]["max_mps_frame_ids"] == [0, 1]
+    assert m["speed"]["max_mps_is_leading_frames"] is True
+
+
+def test_mid_trajectory_speed_spike_is_not_flagged_as_leading(tmp_path):
+    """The same magnitude spike, but positioned well past the first
+    LEADING_STEP_COUNT transitions, must NOT be flagged as leading-frame
+    noise -- that's the genuinely-concerning case (real teleport/glitch)
+    the leading-frames distinction exists to separate out."""
+    R_id = np.eye(3)
+    trajectory = [
+        {"frame_id": 0, "R": R_id, "t": np.array([0.0, 0.0, 0.0])},
+        {"frame_id": 1, "R": R_id, "t": np.array([0.01, 0.0, 0.0])},
+        {"frame_id": 2, "R": R_id, "t": np.array([0.02, 0.0, 0.0])},
+        {"frame_id": 3, "R": R_id, "t": np.array([0.03, 0.0, 0.0])},
+        {"frame_id": 4, "R": R_id, "t": np.array([5.03, 0.0, 0.0])},  # teleport mid-trajectory
+        {"frame_id": 5, "R": R_id, "t": np.array([5.04, 0.0, 0.0])},
+    ]
+    rgb_csv = tmp_path / "rgb.csv"
+    _write_rgb_csv(rgb_csv, [(i, i * 1.0) for i in range(6)])
+
+    m = compute_scene_metadata(trajectory, rgb_csv)
+    assert m["speed"]["max_mps_step_index"] == 3
+    assert m["speed"]["max_mps_frame_ids"] == [3, 4]
+    assert m["speed"]["max_mps_is_leading_frames"] is False
 
 
 def test_revisit_detection(tmp_path):

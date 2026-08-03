@@ -30,6 +30,21 @@ logger = get_logger(__name__)
 DEFAULT_REVISIT_DISTANCE_M = 0.5
 DEFAULT_REVISIT_MIN_TIME_GAP_S = 5.0
 
+# FIXED 2026-08-03 (found investigating table1's real scene_metadata.json):
+# a max_mps/max_deg_per_frame spike driven by the trajectory's first couple
+# of pose transitions is a qualitatively different (much less concerning)
+# signal than a mid-trajectory spike -- COLMAP's earliest registered poses
+# haven't accumulated much multi-view constraint yet and are characteristically
+# less stable, not evidence of a genuine tracking glitch/teleport. Verified
+# on table1: frames 0->1 (9.499 m/s) and 1->2 (9.027 m/s) were the only two
+# outliers: everything else in the top-8 speeds was <=1.16 m/s, consistent
+# with a normal handheld pace. Without flagging *where* the max occurred, a
+# reader has to re-derive this distinction by hand every time. If this shows
+# up consistently across scenes it's a general COLMAP-early-registration
+# characteristic; check the "is_leading" flag on other scenes' output before
+# assuming it's scene-specific.
+LEADING_STEP_COUNT = 2
+
 
 def compute_scene_metadata(
     trajectory: list[dict[str, Any]],
@@ -114,10 +129,27 @@ def compute_scene_metadata(
         valid_dt = dt > 0
         if np.any(valid_dt):
             step_speeds = step_lengths[valid_dt] / dt[valid_dt]
+            # Map back from the valid_dt-filtered array to the original
+            # step index (0 = the transition from sorted_traj[0] to
+            # sorted_traj[1]), so max_mps_step_index means what it says
+            # even when some steps were excluded for bad timestamps.
+            valid_step_indices = np.where(valid_dt)[0]
+            max_i = int(valid_step_indices[np.argmax(step_speeds)])
             speed_block = {
                 "avg_mps": trajectory_length_m / duration_s if duration_s > 0 else None,
                 "max_mps": float(np.max(step_speeds)),
                 "std_mps": float(np.std(step_speeds)),
+                # Which step (sorted_traj[max_mps_step_index] ->
+                # sorted_traj[max_mps_step_index+1]) produced the max, and
+                # whether it falls within the first LEADING_STEP_COUNT
+                # transitions -- see the module-level note above on why
+                # that distinction matters (early-registration noise vs a
+                # genuine mid-trajectory glitch/teleport).
+                "max_mps_step_index": max_i,
+                "max_mps_frame_ids": [
+                    sorted_traj[max_i]["frame_id"], sorted_traj[max_i + 1]["frame_id"],
+                ],
+                "max_mps_is_leading_frames": max_i < LEADING_STEP_COUNT,
             }
         result["duration_s"] = duration_s
     else:
@@ -136,10 +168,17 @@ def compute_scene_metadata(
             rotation_angle_deg(rotations[i], rotations[i + 1])
             for i in range(n_poses - 1)
         ])
+        max_i = int(np.argmax(step_angles_deg))
         rotation_block = {
             "total_deg": float(np.sum(step_angles_deg)),
             "avg_deg_per_frame": float(np.mean(step_angles_deg)),
             "max_deg_per_frame": float(np.max(step_angles_deg)),
+            # Same leading-frames distinction as speed.max_mps_* above.
+            "max_deg_step_index": max_i,
+            "max_deg_frame_ids": [
+                sorted_traj[max_i]["frame_id"], sorted_traj[max_i + 1]["frame_id"],
+            ],
+            "max_deg_is_leading_frames": max_i < LEADING_STEP_COUNT,
         }
     result["rotation"] = rotation_block
 
