@@ -15,6 +15,8 @@ from colmap_rgbd_gt.colmap.scale_regime_correction import (
     apply_segment_similarities,
     _apply_chain_to_pose,
     _compute_chained_transforms,
+    _find_low_confidence_segments,
+    LOW_CONFIDENCE_THRESHOLD,
 )
 from colmap_rgbd_gt.scaling.scale_estimation import SimilarityEstimate
 
@@ -151,3 +153,25 @@ def test_apply_segment_similarities_rescales_points_and_keeps_continuity():
     # -- just confirm it moved by the segment's scale factor structurally
     # (exact value depends on the chained rigid correction).
     assert new_model["points3d"][2]["xyz"][0] != pytest.approx(2.0, abs=1e-6)
+
+
+def test_find_low_confidence_segments_flags_weak_fits():
+    """A segment fit under LOW_CONFIDENCE_THRESHOLD (too few real-depth
+    correspondences for a reliable anchor) must be flagged by index so
+    scale_only.py can surface it for manual review instead of silently
+    trusting it."""
+    strong = SimilarityEstimate(
+        scale=1.0, R=np.eye(3), t=np.zeros(3), confidence=1.0, num_samples=100, inlier_ratio=0.9
+    )
+    weak = SimilarityEstimate(
+        scale=1.0, R=np.eye(3), t=np.zeros(3), confidence=0.1, num_samples=5, inlier_ratio=0.9
+    )
+    borderline = SimilarityEstimate(
+        scale=1.0, R=np.eye(3), t=np.zeros(3), confidence=LOW_CONFIDENCE_THRESHOLD, num_samples=20, inlier_ratio=0.9
+    )
+
+    assert _find_low_confidence_segments([strong, weak]) == [1]
+    assert _find_low_confidence_segments([weak, weak]) == [0, 1]
+    assert _find_low_confidence_segments([strong, strong]) == []
+    # confidence exactly at the threshold is not "below" it -- not flagged
+    assert _find_low_confidence_segments([borderline]) == []

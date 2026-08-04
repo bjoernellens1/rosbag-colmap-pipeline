@@ -62,6 +62,38 @@ registration characteristic rather than something scene-specific -- worth
 checking as the other rerun-queue scenes (floor3, tableware1, hallway,
 kitchen1, workshop1) complete.
 
+**floor2 reprocessed 2026-08-04** with `configs/navigation.yaml` (was
+`configs/default.yaml`) -- fixed a real bad reconstruction: `default.yaml`'s
+untuned matcher (`sequential_overlap: 10`, no `quadratic_overlap`, no
+`loop_detection`) left a weak match-graph link around frames 327-332/
+567-600 (both genuine, non-leading motion anomalies -- an 11.8°/frame
+rotation spike and a 1.27 m/s speed spike), which the `global_mapper`
+joint optimization then settled into as a stable-but-wrong two-scale-
+regime local minimum (`scale_regime_correction.json` showed a 0.83 vs 2.65
+COLMAP-to-depth ratio jump, ~3.2x, right at the frame-600 boundary), with
+repeated Ceres "Matrix not positive definite" (CHOLMOD) warnings during
+bundle adjustment. Re-running `run-colmap` + `scale-depth` with
+`navigation.yaml` (wider `sequential_overlap: 20`, `quadratic_overlap`,
+`loop_detection` via the baked-in vocab tree, a longer final global BA
+pass) fixed it directly: 267/267 poses registered (was 256/267), zero
+scale-regime discontinuity (`action_taken: false`), and a physically
+plausible 4.8m x 1.2m x 11.9m trajectory extent (was a collapsed
+5.2m x 0.6m x 8.1m). No re-extraction was needed -- `navigation.yaml`'s
+`sync:`/`depth:` blocks are identical to `default.yaml`'s and its
+`keyframe_selection` was separately validated at 267/267 coverage on this
+same scene, so only the COLMAP and scale stages needed rerunning.
+
+**Which config for which scene:** if `scene_metadata.json` from a
+`default.yaml` run flags a genuine (non-leading, i.e. `is_leading_frames:
+false`) rotation or speed spike, treat `default.yaml` as insufficient and
+re-run with `configs/navigation.yaml` instead -- it exists specifically to
+bridge the weak-overlap regions such spikes tend to produce. Do not merge
+`navigation.yaml`'s settings into `default.yaml`: the wider matching +
+loop-detection + longer final BA pass roughly doubles (or worse) matching/
+mapping runtime, which is wasted cost on short/easy scenes with naturally
+strong overlap. Keep `default.yaml` lean and pick `navigation.yaml`
+deliberately per this rule.
+
 ## Default workspace location
 
 `gttool extract` and `gttool full` default `--workspace`/`-w` to

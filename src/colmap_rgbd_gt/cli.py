@@ -250,6 +250,7 @@ def run_colmap(
 def scale_depth(
     workspace: Path = typer.Argument(..., help="Path to workspace directory"),
     method: str = typer.Option("umeyama", "--method", "-m", help="Scale estimation method (median, umeyama, ransac)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration YAML file (scaling: section only is used)"),
 ) -> None:
     """
     Estimate metric scale from depth data.
@@ -264,11 +265,27 @@ def scale_depth(
 
     from colmap_rgbd_gt.pipelines.scale_only import scale_pipeline
 
-    config = {"scaling": {"method": method}}
+    # FIXED 2026-08-04: this command previously hardcoded
+    # `config = {"scaling": {"method": method}}`, silently ignoring ANY
+    # scaling: tuning (max_frames_for_scale, outlier_rejection,
+    # robust_statistic, depth_tolerance, camera_fallback_profile, etc) from
+    # a config like configs/navigation.yaml -- so running scale-depth
+    # against a scene that needs navigation.yaml's looser depth_tolerance
+    # (e.g. floor2) silently reverted to the much tighter code default,
+    # starving scale estimation of correspondences. `run-colmap` already
+    # loads --config this way (see FIXED 2026-08-02 above); this command
+    # hadn't been kept in sync with that pattern.
+    config_dict: dict = {}
+    if config and config.exists():
+        import yaml
+        config_dict = yaml.safe_load(config.read_text()) or {}
+    config_dict.setdefault("scaling", {})["method"] = method
 
     console.print(f"[cyan]Estimating scale for: {workspace}[/cyan]")
+    if config:
+        console.print(f"[cyan]Using config: {config}[/cyan]")
 
-    success = scale_pipeline(workspace, config)
+    success = scale_pipeline(workspace, config_dict)
 
     if success:
         console.print("[green]✓ Scale estimation complete[/green]")

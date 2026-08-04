@@ -57,6 +57,7 @@ DEFAULT_JUMP_RATIO_THRESHOLD = 1.5
 DEFAULT_MIN_SEGMENT_FRAMES = 10
 DEFAULT_SMOOTHING_WINDOW = 5
 DEFAULT_MIN_POINTS_PER_FRAME = 50
+LOW_CONFIDENCE_THRESHOLD = 0.3
 
 
 @dataclass
@@ -71,6 +72,7 @@ class ScaleRegimeCorrectionResult:
     reason: str = ""
     n_segments: int = 1
     segments: list[dict[str, Any]] = field(default_factory=list)
+    low_confidence_segments: list[int] = field(default_factory=list)
 
 
 def compute_per_frame_scale_ratios(
@@ -414,6 +416,14 @@ def apply_segment_similarities(
     return new_model
 
 
+def _find_low_confidence_segments(
+    transforms: list, threshold: float = LOW_CONFIDENCE_THRESHOLD
+) -> list[int]:
+    """Indices of segment similarity fits too weak to trust unreviewed
+    (too few real-depth correspondences for a reliable anchor)."""
+    return [i for i, t in enumerate(transforms) if t.confidence < threshold]
+
+
 def correct_scale_regimes(
     workspace,
     config: dict[str, Any] | None = None,
@@ -507,13 +517,13 @@ def correct_scale_regimes(
         )
         transforms.append(sim)
 
-    low_confidence = [i for i, t in enumerate(transforms) if t.confidence < 0.3]
+    low_confidence = _find_low_confidence_segments(transforms)
     if low_confidence:
         logger.warning(
-            f"scale_regime_correction: segment(s) {low_confidence} have low-confidence similarity "
-            "fits (too few real-depth correspondences for a reliable anchor) -- applying anyway since "
-            "leaving them at their original (known-inconsistent) scale is strictly worse, but flagging "
-            "for awareness."
+            f"REVIEW REQUIRED: scale_regime_correction: segment(s) {low_confidence} have "
+            "low-confidence similarity fits (too few real-depth correspondences for a reliable "
+            "anchor) -- applying anyway since leaving them at their original (known-inconsistent) "
+            "scale is strictly worse, but this correction should be manually reviewed."
         )
 
     new_model = apply_segment_similarities(model, segments, transforms, trajectory_by_frame_id)
@@ -560,4 +570,5 @@ def correct_scale_regimes(
         reason=f"corrected {len(segments)} scale-regime segments",
         n_segments=len(segments),
         segments=segments_info,
+        low_confidence_segments=low_confidence,
     )

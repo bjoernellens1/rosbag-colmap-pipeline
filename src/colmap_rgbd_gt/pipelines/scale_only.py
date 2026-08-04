@@ -26,6 +26,29 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         logger.error(f"Invalid workspace: {workspace}")
         return False
 
+    # FIXED 2026-08-04: scale-depth intentionally mutates colmap/sparse/0 in
+    # place (pose-outlier removal and scale-regime correction below both
+    # rewrite it), so a workspace that has already been through scale-depth
+    # once is NOT the same input a second run sees -- estimate_global_scale
+    # below will silently compute a different scale against the
+    # already-corrected model, with no indication anything changed (observed
+    # on floor2: 0.741 then 0.903 across two consecutive runs on the same
+    # workspace path). Warn loudly rather than pretend this is a fresh run.
+    for marker_name in ("scale_regime_correction.json", "pose_outlier_filter.json"):
+        marker_path = ws.layout.outputs / marker_name
+        if marker_path.exists():
+            try:
+                import json as _json
+                if _json.loads(marker_path.read_text()).get("action_taken"):
+                    logger.warning(
+                        f"{marker_name} from a previous scale-depth run shows action_taken=true -- "
+                        f"colmap/sparse/0 was already mutated by that run. This run's scale estimate "
+                        "is computed against that already-corrected model, not the original COLMAP "
+                        "output, and is not directly comparable to the first run's."
+                    )
+            except Exception:
+                pass
+
     scaling_config = config.get("scaling", {})
 
     logger.info("Estimating metric scale from depth...")
@@ -139,6 +162,13 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
                 f"Corrected {regime_result.n_segments} internally-inconsistent scale regime(s) "
                 f"in colmap/sparse model: {regime_result.segments}"
             )
+        if regime_result.low_confidence_segments:
+            logger.warning(
+                "REVIEW REQUIRED: low-confidence scale-regime correction(s) applied to segment(s) "
+                f"{[regime_result.segments[i] for i in regime_result.low_confidence_segments]} -- "
+                "too few real-depth correspondences for a reliable anchor; inspect "
+                "scale_regime_correction.json before trusting this scene's trajectory."
+            )
         try:
             import json
             with open(ws.layout.outputs / "scale_regime_correction.json", "w") as f:
@@ -147,6 +177,7 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
                     "reason": regime_result.reason,
                     "n_segments": regime_result.n_segments,
                     "segments": regime_result.segments,
+                    "low_confidence_segments": regime_result.low_confidence_segments,
                 }, f, indent=2)
         except Exception as e:
             logger.warning(f"Could not save scale_regime_correction.json: {e}")
