@@ -51,11 +51,21 @@ class COLMAPResult:
 
 
 class COLMAPRunner:
-    def __init__(self, workspace: Path, colmap_path: str = "colmap"):
+    def __init__(
+        self,
+        workspace: Path,
+        colmap_path: str = "colmap",
+        image_dir_name: str = "rgb",
+    ):
         self.workspace = Path(workspace)
         self.colmap_path = colmap_path
         self.database = self.workspace / "colmap" / "database.db"
-        self.images_dir = self.workspace / "rgb"
+        # ADDED 2026-08-04: image_dir_name lets a caller point feature
+        # extraction at rgb_rectified/ instead of rgb/ -- see
+        # rectify/undistort.py's rectify_workspace_images(), used when
+        # colmap.ba_backend: caspar needs a true PINHOLE input (Caspar
+        # doesn't support OPENCV).
+        self.images_dir = self.workspace / image_dir_name
         self.sparse_dir = self.workspace / "colmap" / "sparse"
         self.logs_dir = self.workspace / "colmap" / "logs"
 

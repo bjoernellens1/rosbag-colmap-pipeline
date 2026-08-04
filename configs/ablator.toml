@@ -58,21 +58,26 @@ mps = true                           # required: cluster GPUs run Exclusive_Proc
 # cuDSS has a documented history of silent wrong-answer bugs across
 # exactly that version range. See docs/cluster-dispatch.md.
 #
-# Caspar (COLMAP's native GPU BA solver, no Ceres/cuDSS dependency) was
-# also tried and IS numerically correct -- but only supports PINHOLE/
-# SIMPLE_RADIAL camera models, not this pipeline's OPENCV (needed for
-# real RGBD lens tangential distortion). Tested live 2026-08-04 on
-# floor2: forcing SIMPLE_RADIAL reproduced the same 2-scale-regime split
-# on BOTH CPU and Caspar/GPU that the OPENCV baseline doesn't have at
-# all -- a genuine accuracy loss from the distortion-model downgrade,
-# not a Caspar bug. Parked until/unless Caspar gains OPENCV support
-# upstream. See docs/cluster-dispatch.md's Caspar section.
-#
-# Back on the known-good cuda-<sha> image: GPU feature-extraction/
-# matching/global-positioning, CPU bundle adjustment (OPENCV camera
-# model, no scale-regime split, matches every baseline this session
-# established).
-image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-9e57d32"
+# Caspar (COLMAP's native GPU BA solver, no Ceres/cuDSS dependency) IS
+# used here, via docker/Dockerfile.cuda's -DCASPAR_ENABLED=ON build --
+# Caspar only supports PINHOLE/SIMPLE_RADIAL, not this pipeline's OPENCV,
+# so pipelines/colmap_only.py undistorts RGB to a true PINHOLE image
+# first (rectify/undistort.py's rectify_workspace_images(), see
+# configs/navigation.yaml's ba_backend: caspar comment). Verified live
+# 2026-08-04: tableware1 (155 frames, tabletop scan) reconstructs cleanly
+# with ZERO scale-regime split, 0.24s Caspar BA. floor2 (267 frames,
+# navigation corridor) still shows a SMALLER residual split (~1.9x, down
+# from SIMPLE_RADIAL's ~3.6x) even with mathematically-correct
+# undistortion -- ruled out as an undistortion-quality artifact (two
+# different interpolation/border-handling implementations produced
+# nearly identical splits), so it's a scene-specific sensitivity of
+# navigation.yaml's matcher tuning to the exact pixel content, not a
+# distortion-math bug. scale_regime_correction already auto-corrects any
+# split that does occur (see colmap/scale_regime_correction.py) -- always
+# run scale-depth and check its output for "internally-inconsistent
+# scale regimes" after any cluster dispatch, same as every other scene
+# validated this session. See docs/cluster-dispatch.md's Caspar section.
+image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-caspar-v3"
 max_concurrent = 8                   # real GPU count on this cluster; doesn't control actual scheduling,
                                       # just how many in-flight k8s Jobs the dispatcher tracks at once
 # FIXED 2026-08-04: NOT using pvc_scratch here (despite that being the

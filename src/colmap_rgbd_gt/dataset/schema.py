@@ -8,6 +8,7 @@ from pathlib import Path
 class WorkspaceLayout:
     manifest: Path
     rgb: Path
+    rgb_rectified: Path
     depth: Path
     camera: Path
     timestamps: Path
@@ -20,6 +21,12 @@ class WorkspaceLayout:
         return cls(
             manifest=root / "manifest.json",
             rgb=root / "rgb",
+            # Undistorted-to-PINHOLE copy of rgb/, only populated when
+            # colmap.ba_backend: caspar (Caspar's GPU BA solver doesn't
+            # support OPENCV -- see rectify/undistort.py's
+            # rectify_workspace_images()). Not created by Workspace.create()
+            # since most workspaces never need it.
+            rgb_rectified=root / "rgb_rectified",
             depth=root / "depth",
             camera=root / "camera",
             timestamps=root / "timestamps",

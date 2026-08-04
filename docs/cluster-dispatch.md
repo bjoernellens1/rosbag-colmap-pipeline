@@ -118,46 +118,55 @@ one has publicly verified Ceres-master+cuDSS as numerically correct on Ampere.
 ships a tagged release with cuDSS support and cuDSS itself has moved well past the buggy version
 range above.
 
-### GPU bundle adjustment via Caspar — numerically correct, but blocked by camera model
+### GPU bundle adjustment via Caspar — working, via image undistortion
 
 COLMAP >=4.1.0 ships **Caspar**, a native GPU bundle-adjustment solver bundled directly in COLMAP
 (`src/thirdparty/Symforce-Caspar/`) — it is *not* a Ceres backend, so it sidesteps the whole
 Ceres+cuDSS dependency chain above entirely. `docker/Dockerfile.cuda` builds COLMAP with
 `-DCASPAR_ENABLED=ON` and otherwise uses apt's plain CPU-only `libceres-dev` (Ceres is still
-needed for COLMAP's non-BA estimators, just not for BA itself). Enabled via
-`configs/navigation.yaml`'s (commented-out) `colmap.ba_backend: caspar`, which
-`colmap/runner.py`'s `bundle_adjuster()` translates to `--BundleAdjustment.backend CASPAR` on the
-final global BA pass, only when `use_gpu` is also true.
+needed for COLMAP's non-BA estimators, just not for BA itself).
 
-**Tested live 2026-08-04 — Caspar itself works correctly, but is not usable for this pipeline's
-camera model.** Caspar's BA kernel only supports COLMAP's `PINHOLE`/`SIMPLE_RADIAL` camera
-models (confirmed against COLMAP 4.1.1's `bundle_adjustment_caspar.cc` source); this pipeline
-uses `OPENCV` (needed for real RGBD lens tangential distortion, `p1`/`p2`). Pointed at an
-`OPENCV`-model reconstruction, Caspar silently skips every image ("unsupported camera model:
-OPENCV") and runs BA with 0 residuals — a real capability gap, not a bug.
+**Caspar's BA kernel only supports `PINHOLE`/`SIMPLE_RADIAL` camera models** (confirmed against
+COLMAP 4.1.1's `bundle_adjustment_caspar.cc` source), not this pipeline's `OPENCV` (needed for
+real RGBD lens tangential distortion, `p1`/`p2`). A first attempt approximated the camera model
+as `SIMPLE_RADIAL` (dropping `p1`/`p2`) — rejected after live testing on floor2 reproduced a real
+2-way scale-regime split (0.54 vs 1.91 CPU, 0.53 vs 3.57 GPU) the `OPENCV` baseline (267/267
+poses, no split) doesn't have.
 
-To test whether the accuracy loss from downgrading to `SIMPLE_RADIAL` (single radial term, no
-tangential) is actually tolerable, floor2 was reconstructed identically on CPU and on Caspar/GPU
-with `camera_model: SIMPLE_RADIAL` forced:
+**Fixed properly**: `configs/navigation.yaml`'s `colmap.ba_backend: caspar`, when `use_gpu` is
+also true, makes `pipelines/colmap_only.py` undistort every RGB frame to a mathematically exact
+`PINHOLE` image *before* COLMAP ever sees it (`rectify/undistort.py`'s
+`rectify_workspace_images()`, writing to a new `rgb_rectified/` workspace directory), then runs
+COLMAP with zero distortion — no approximation, same `K` (`newCameraMatrix=K` convention, so the
+depth image's pixel grid stays aligned, no changes needed in `scaling/backproject.py`). A
+`colmap/rectified.json` marker tells a later, separate `scale-depth` invocation to also treat the
+workspace's intrinsics as zero-distortion (`scaling/scale_estimation.py`), so 3D→2D reprojection
+in `scaling/correspondences.py` matches COLMAP's actual (now undistorted) 2D observations.
 
-| | poses | final BA cost | scale regimes |
-|---|---|---|---|
-| OPENCV baseline (CPU) | 267/267 | 0.493 px | 1 (no split) |
-| SIMPLE_RADIAL, CPU | 267/267 | 0.510 px | **2** (0.54 vs 1.91) |
-| SIMPLE_RADIAL, Caspar/GPU | 267/267 | n/a (Caspar logs no per-iteration cost) | **2** (0.53 vs 3.57) |
+Verified live 2026-08-04:
 
-Both `SIMPLE_RADIAL` runs reproduce the same 2-way scale-regime split the OPENCV baseline
-doesn't have at all — proving this is a genuine accuracy loss from dropping tangential
-distortion correction for this camera's real lens, identical on CPU and GPU, **not** a
-Caspar-specific numerical bug (unlike the Ceres+cuDSS case above, which corrupted results even
-though the config was correct). Caspar is confirmed numerically sound; it's simply the wrong
-tool while this pipeline needs `OPENCV`-model accuracy.
+| scene | frames | poses | scale regimes | Caspar BA time |
+|---|---|---|---|---|
+| tableware1 (tabletop scan) | 155 | 154/155 | **1 (no split)** | 0.24s |
+| floor2 (navigation corridor) | 267 | 267/267 | 2 (0.61 vs 1.15, ~1.9x) | 0.36s |
 
-**Do not enable `ba_backend: caspar` in `configs/navigation.yaml`** unless the scene's camera
-genuinely has negligible tangential distortion (verify via a `SIMPLE_RADIAL` vs `OPENCV`
-scale-regime-split comparison first, same as above) or Caspar gains `OPENCV` support upstream.
-`configs/ablator.toml` points at the known-good `cuda-<sha>` image (GPU feature-extraction/
-matching, CPU bundle adjustment) for this reason.
+`tableware1` reconstructs cleanly with zero scale-regime split — the fix works as intended.
+`floor2` still shows a *smaller* residual split (~1.9x, down from the `SIMPLE_RADIAL` attempt's
+up to 3.6x) even with mathematically-correct undistortion. Ruled out as an undistortion-quality
+artifact: two structurally different implementations (`cv2.undistort`'s default bilinear
+interpolation + black-fill border, vs. `initUndistortRectifyMap`+`remap` with `INTER_LANCZOS4` +
+`BORDER_REPLICATE`) produced nearly identical splits at nearly the same sample-index boundary.
+Conclusion: undistorting the images at all shifts which SIFT features get detected/matched
+enough that floor2's `navigation.yaml` matcher tuning (overlap window, loop detection
+thresholds) — validated against the *raw* `OPENCV`-distorted images — doesn't reconnect this
+particular scene as cleanly against the undistorted set. A scene-specific matcher-tuning
+sensitivity, not a distortion-math bug.
+
+`colmap/scale_regime_correction.py` already auto-corrects any split that does occur (independent
+per-regime metric anchoring) — but **always run `scale-depth` and check its log for
+"internally-inconsistent scale regimes" after any Caspar-enabled cluster dispatch**, same as
+every other scene validated this session, especially for navigation/corridor-style scenes.
+`configs/ablator.toml` points at the verified `cuda-caspar-v3` image.
 
 ## Dispatching a job
 
