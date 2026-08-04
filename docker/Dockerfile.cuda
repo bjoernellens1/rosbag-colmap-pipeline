@@ -97,8 +97,27 @@ RUN uv pip install --upgrade pip setuptools wheel
 # --Mapper.ba_local_backend/--Mapper.ba_global_backend CASPAR
 # (incremental mapper). Needs no extra apt packages beyond the CUDA
 # toolkit already present in this image.
+# docker/patches/caspar-opencv/ adds native OPENCV camera-model support to
+# Caspar (COLMAP upstream only ships PINHOLE/SIMPLE_RADIAL) -- see that
+# directory's README.md for the full derivation/verification writeup.
+# Overlaid onto the cloned source before cmake/ninja: the patched
+# caspar_generate.py's *output* (generated_f32/, already regenerated on the
+# host -- this build does NOT need symforce or re-run codegen), plus the
+# small bundle_adjustment_caspar.cc/caspar_model_adapter.h dispatch changes.
+COPY docker/patches/caspar-opencv/generated_f32/ /tmp/caspar-opencv-patch/generated_f32/
+COPY docker/patches/caspar-opencv/bundle_adjustment_caspar.cc /tmp/caspar-opencv-patch/bundle_adjustment_caspar.cc
+COPY docker/patches/caspar-opencv/caspar_model_adapter.h /tmp/caspar-opencv-patch/caspar_model_adapter.h
+
 ARG COLMAP_BUILD_JOBS=
 RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt/colmap_src \
+    && rm -rf /opt/colmap_src/src/thirdparty/Symforce-Caspar/generated/f32 \
+    && cp -r /tmp/caspar-opencv-patch/generated_f32 \
+        /opt/colmap_src/src/thirdparty/Symforce-Caspar/generated/f32 \
+    && cp /tmp/caspar-opencv-patch/bundle_adjustment_caspar.cc \
+        /opt/colmap_src/src/colmap/estimators/bundle_adjustment_caspar.cc \
+    && cp /tmp/caspar-opencv-patch/caspar_model_adapter.h \
+        /opt/colmap_src/src/colmap/estimators/caspar/caspar_model_adapter.h \
+    && rm -rf /tmp/caspar-opencv-patch \
     && mkdir -p /opt/colmap_src/build \
     && cd /opt/colmap_src/build \
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \
