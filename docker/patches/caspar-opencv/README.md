@@ -1,5 +1,10 @@
 # Caspar OpenCV camera-model patch
 
+Submitted upstream: [colmap/colmap#4611](https://github.com/colmap/colmap/pull/4611) (addresses
+[colmap/colmap#4371](https://github.com/colmap/colmap/issues/4371)). This directory can be
+removed and `docker/Dockerfile.cuda` simplified back to a plain `git clone` once that merges and
+this pipeline bumps its pinned COLMAP tag past it.
+
 Adds native `OPENCV` camera-model support to COLMAP's Caspar GPU bundle-adjustment
 backend (COLMAP >=4.1.0 only supports `PINHOLE`/`SIMPLE_RADIAL` upstream). Applied
 during `docker/Dockerfile.cuda`'s COLMAP build step, overlaying these files onto the
