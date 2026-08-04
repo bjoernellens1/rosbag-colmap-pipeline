@@ -21,10 +21,26 @@ ENV PYTHONUNBUFFERED=1
 RUN sed -i 's|archive\.ubuntu\.com|de.archive.ubuntu.com|g; s|security\.ubuntu\.com|de.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "15";\nAcquire::https::Timeout "15";\n' > /etc/apt/apt.conf.d/99network-resilience
 
-# Same dependency list as docker/Dockerfile (CPU/ROCm image), MINUS
-# libceres-dev -- apt's Ceres is CPU-only (no CUDA, no cuDSS), so it's
-# built from source below instead for genuine GPU-accelerated bundle
-# adjustment (not just GPU feature extraction/matching).
+# Same dependency list as docker/Dockerfile (CPU/ROCm image), INCLUDING
+# libceres-dev -- unlike the earlier cuDSS-based attempt, this image does
+# NOT build Ceres from source at all. GPU bundle adjustment comes from
+# COLMAP's own native "Caspar" solver (COLMAP >=4.1.0, -DCASPAR_ENABLED=ON
+# below), which bypasses Ceres/cuDSS entirely -- it's COLMAP's own CUDA
+# kernel code (bundled under src/thirdparty/Symforce-Caspar/), not a
+# Ceres GPU backend. apt's plain CPU-only Ceres is all COLMAP's own
+# Ceres-backed code paths (feature matching geometry, non-BA estimators)
+# need; the actual BA hot path uses Caspar instead when requested.
+#
+# See docs/cluster-dispatch.md's "Ceres+cuDSS" section for why that route
+# was abandoned: building Ceres from source (master, unreleased cuDSS
+# integration) against NVIDIA cuDSS produced numerically corrupted
+# reconstructions on real A100 hardware, confirmed with two different
+# cuDSS versions and root-caused (via research) to a documented history
+# of cuDSS silent-wrong-answer bugs across that exact version range
+# (NVIDIA cuDSS release-notes items CUDSS-882/1003/1020/1292/1293) plus
+# Ceres' cuDSS integration itself being unreleased/master-only. Caspar
+# sidesteps that whole dependency chain -- it's an officially shipped,
+# tagged-release COLMAP feature, not an unreleased Ceres branch.
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
@@ -54,81 +70,10 @@ RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     libopenimageio-dev \
     openimageio-tools \
+    libceres-dev \
     curl \
     wget \
     && rm -rf /var/lib/apt/lists/*
-
-# NVIDIA cuDSS (CUDA Direct Sparse Solver) -- Ceres 2.2+'s GPU sparse
-# Cholesky backend for bundle adjustment needs this specifically; CUDA
-# toolkit alone only gets Ceres' GPU DENSE solver, not sparse (confirmed
-# live: "Ceres was compiled without cuDSS support. Falling back to
-# CPU-based sparse solvers." on an earlier CUDA-only build of this image).
-#
-# PINNED to 0.3.0.9 via NVIDIA's direct tarball, NOT apt's current
-# 0.8.0.10 -- apt's latest silently produced a CORRUPTED reconstruction
-# (confirmed live on a real scene: trajectory fragmented into 39
-# disconnected segments up to 81m apart) with a self-contradictory Ceres
-# log line ("Linear solver failure. Failed to compute a step: Success.").
-# Root-caused via deep research, not guessed: Ceres master's cuDSS
-# integration (still unreleased -- no tagged release has cuDSS support at
-# all, see ceres-solver/ceres-solver#1161) is only ever CI-tested against
-# cuDSS 0.3.0.9 (see ceres-solver's own .github/workflows/linux.yml,
-# which fetches exactly this tarball/version) -- apt's 0.8.0.10 is five
-# minor versions past anything Ceres' integration code has ever been
-# validated against, no version pin/check exists in Ceres' CMakeLists.txt
-# to catch the mismatch. A related open upstream bug
-# (ceres-solver/ceres-solver#1079) documents cuDSS persisting numerical-
-# factorization-error state across calls unless the whole cuDSS context is
-# reset -- plausible contributor, unverified against 0.8.x. The tarball's
-# own directory layout (include/, lib/, lib/cmake/cudss/) also matches
-# what cudss-config.cmake expects natively -- no header-path workaround
-# needed here, unlike the apt .deb's non-matching Debian FHS layout.
-RUN wget -q https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz \
-    && mkdir -p /opt/cudss \
-    && tar -xf libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz -C /opt/cudss --strip-components=1 \
-    && rm libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz \
-    && echo /opt/cudss/lib > /etc/ld.so.conf.d/cudss.conf \
-    && ldconfig \
-    # cuDSS's shipped cudss-config-version.cmake doesn't correctly report
-    # its own version to CMake's find_package version-compatibility check
-    # (confirmed live: COLMAP's build failed with "Could not find a
-    # configuration file for package cudss that is compatible with
-    # requested version 0.3.0" / "version: unknown" even though the exact
-    # right package IS present at that exact path) -- a known class of
-    # issue with this vendor's cmake packaging (see ceres-solver/
-    # ceres-solver#1125, #1151). Replace it with a minimal, always-
-    # compatible version file -- safe here since we control both sides
-    # (Ceres was built against this exact cuDSS install already).
-    && printf 'set(PACKAGE_VERSION "0.3.0.9")\nset(PACKAGE_VERSION_EXACT FALSE)\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\nset(PACKAGE_VERSION_UNSUITABLE FALSE)\n' \
-       > /opt/cudss/lib/cmake/cudss/cudss-config-version.cmake
-
-# Ceres Solver built from source with CUDA (dense) + cuDSS (sparse) GPU
-# solver support -- apt's libceres-dev has neither. Bundled abseil-cpp/
-# googletest (Ceres' own third_party/ submodule pins) instead of a plain
-# `git submodule update`, matching the exact recipe that's confirmed to
-# build cleanly against COLMAP 4.1.1's Ceres API expectations.
-# FIXED: an initially-pinned older commit (93e66f0d) predates a cuDSS API
-# break (cudaDataType_t -> cudssDataType_t, cuDSS support isn't in any
-# tagged Ceres release yet, only >=2.2.0's unstable branch) -- confirmed
-# live: it failed to compile against apt's current cuDSS (0.8.0.10) with
-# exactly that type-mismatch error. Track master instead, which follows
-# cuDSS's current API.
-ARG CERES_BUILD_JOBS=
-RUN git clone https://github.com/ceres-solver/ceres-solver.git /opt/ceres_src \
-    && cd /opt/ceres_src \
-    && cd third_party \
-    && rm -rf abseil-cpp googletest \
-    && git clone -b 20250127.1 --depth 1 https://github.com/abseil/abseil-cpp.git \
-    && git clone -b v1.16.0 --depth 1 https://github.com/google/googletest.git \
-    && cd /opt/ceres_src \
-    && mkdir build && cd build \
-    && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CUDA_ARCHITECTURES=80 \
-        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -Dcudss_DIR=/opt/cudss/lib/cmake/cudss/ \
-    && ninja -j "${CERES_BUILD_JOBS:-$(nproc)}" \
-    && ninja install \
-    && rm -rf /opt/ceres_src
 
 # No ROCm/PyTorch base to inherit site-packages from here (unlike
 # docker/Dockerfile) -- a plain venv is enough.
@@ -144,6 +89,14 @@ RUN uv pip install --upgrade pip setuptools wheel
 # CMAKE_CUDA_ARCHITECTURES autodetection needs a GPU present at build
 # time, which this build host does not have (splatograph hit exactly this
 # failure class building its own Dockerfile.cuda for the same cluster).
+#
+# -DCASPAR_ENABLED=ON: COLMAP's own native GPU bundle-adjustment solver
+# (shipped since 4.1.0, bundled thirdparty CUDA kernel source, not a
+# Ceres backend) -- select it at runtime with
+# --BundleAdjustment.backend CASPAR (standalone bundle_adjuster) or
+# --Mapper.ba_local_backend/--Mapper.ba_global_backend CASPAR
+# (incremental mapper). Needs no extra apt packages beyond the CUDA
+# toolkit already present in this image.
 ARG COLMAP_BUILD_JOBS=
 RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt/colmap_src \
     && mkdir -p /opt/colmap_src/build \
@@ -151,7 +104,7 @@ RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \
         -DCMAKE_CUDA_ARCHITECTURES=80 \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -Dcudss_DIR=/opt/cudss/lib/cmake/cudss/ \
+        -DCASPAR_ENABLED=ON \
     && ninja -j "${COLMAP_BUILD_JOBS:-$(nproc)}" \
     && ninja install \
     && rm -rf /opt/colmap_src

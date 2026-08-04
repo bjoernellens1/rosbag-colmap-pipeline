@@ -48,15 +48,28 @@ class CameraIntrinsics:
         - OPENCV:  fx fy cx cy k1 k2 p1 p2 (8) -- ROS `plumb_bob`'s D is
           [k1, k2, p1, p2, k3]; COLMAP's OPENCV model has no k3 term, so
           it's dropped here (D[:4]), not truncated blindly to 5.
+        - SIMPLE_RADIAL: f cx cy k (4) -- single shared focal length (no
+          separate fx/fy) plus one radial distortion term, no tangential.
+          ADDED 2026-08-04 to test Caspar's GPU bundle-adjustment solver,
+          which only supports PINHOLE/SIMPLE_RADIAL (not OPENCV) -- see
+          docs/cluster-dispatch.md's Caspar section. f is the fx/fy
+          average (COLMAP has no separate-fx/fy SIMPLE_RADIAL variant);
+          k is the first distortion coefficient only, tangential terms
+          (p1/p2) are dropped entirely since this model has no slot for
+          them -- a real accuracy tradeoff being measured, not an
+          oversight.
         """
         model = camera_model or self.get_colmap_model()
-        params = [self.fx, self.fy, self.cx, self.cy]
         if model == "PINHOLE":
-            pass
+            params = [self.fx, self.fy, self.cx, self.cy]
         elif model == "OPENCV":
             coeffs = list(self.distortion_coeffs[:4]) if self.distortion_coeffs else [0.0, 0.0, 0.0, 0.0]
             coeffs += [0.0] * (4 - len(coeffs))
-            params.extend(coeffs)
+            params = [self.fx, self.fy, self.cx, self.cy, *coeffs]
+        elif model == "SIMPLE_RADIAL":
+            f = (self.fx + self.fy) / 2.0
+            k = self.distortion_coeffs[0] if self.distortion_coeffs else 0.0
+            params = [f, self.cx, self.cy, k]
         else:
             raise ValueError(f"to_colmap_str: unsupported camera_model {model!r}")
         return ",".join(map(str, params))

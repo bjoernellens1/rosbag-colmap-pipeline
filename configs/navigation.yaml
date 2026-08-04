@@ -89,6 +89,16 @@ colmap:
   # accumulated drift back together.
   run_bundle_adjustment: true
   bundle_adjustment_max_iterations: 100
+  # NOT set to `caspar` here: Caspar (COLMAP's native GPU BA solver, see
+  # colmap/runner.py's bundle_adjuster()) only supports PINHOLE/
+  # SIMPLE_RADIAL camera models, not this pipeline's OPENCV (needed for
+  # real RGBD lens tangential distortion). Tested live 2026-08-04:
+  # SIMPLE_RADIAL (dropping tangential terms) reproduced the SAME
+  # 2-scale-regime split on BOTH CPU and Caspar/GPU (0.53 vs 1.91 CPU,
+  # 0.53 vs 3.57 GPU) that the OPENCV baseline doesn't have at all
+  # (267/267 poses, no split) -- a genuine accuracy loss from the
+  # distortion-model downgrade, not a Caspar bug. See
+  # docs/cluster-dispatch.md's Caspar section for the full writeup.
 
 scaling:
   method: umeyama

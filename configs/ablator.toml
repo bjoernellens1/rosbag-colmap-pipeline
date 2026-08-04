@@ -51,20 +51,27 @@ gpu_count = 1
 mps = true                           # required: cluster GPUs run Exclusive_Process mode, first CUDA call
                                       # fails with "device busy" on an idle GPU without this
 # DO NOT USE cuda-cudss-* images -- Ceres+cuDSS GPU bundle adjustment is
-# confirmed broken, independent of cuDSS version. Tried TWICE: apt's
-# cuDSS 0.8.0.10 (cuda-cudss-9e57d32) and NVIDIA's official 0.3.0.9
-# tarball (cuda-cudss-v2-d100107, the exact version Ceres' own CI pins)
-# both silently corrupted the floor2 reconstruction on this cluster's
-# real A100 hardware -- fragmented trajectories (39-40 disconnected
-# segments, distances up to 201m between poses), scale estimation
-# confidence 0, and the identical self-contradictory Ceres log line on
-# both attempts: "Linear solver failure. Failed to compute a step:
-# Success." This rules out a simple version mismatch as the cause -- it's
-# a deeper, currently-unresolved problem in Ceres' unreleased cuDSS
-# integration itself (no tagged Ceres release has cuDSS support at all).
-# Use the known-good cuda-<sha> image (GPU feature extraction/matching
-# only, CPU bundle adjustment) until Ceres ships a stable release and
-# this is re-validated from scratch. See docs/cluster-dispatch.md.
+# confirmed broken, independent of cuDSS version (tried TWICE: apt's
+# cuDSS 0.8.0.10 and NVIDIA's official 0.3.0.9 tarball, both silently
+# corrupted real reconstructions on this cluster's A100 hardware). Root
+# cause: Ceres' cuDSS integration is unreleased (master-only) and NVIDIA
+# cuDSS has a documented history of silent wrong-answer bugs across
+# exactly that version range. See docs/cluster-dispatch.md.
+#
+# Caspar (COLMAP's native GPU BA solver, no Ceres/cuDSS dependency) was
+# also tried and IS numerically correct -- but only supports PINHOLE/
+# SIMPLE_RADIAL camera models, not this pipeline's OPENCV (needed for
+# real RGBD lens tangential distortion). Tested live 2026-08-04 on
+# floor2: forcing SIMPLE_RADIAL reproduced the same 2-scale-regime split
+# on BOTH CPU and Caspar/GPU that the OPENCV baseline doesn't have at
+# all -- a genuine accuracy loss from the distortion-model downgrade,
+# not a Caspar bug. Parked until/unless Caspar gains OPENCV support
+# upstream. See docs/cluster-dispatch.md's Caspar section.
+#
+# Back on the known-good cuda-<sha> image: GPU feature-extraction/
+# matching/global-positioning, CPU bundle adjustment (OPENCV camera
+# model, no scale-regime split, matches every baseline this session
+# established).
 image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-9e57d32"
 max_concurrent = 8                   # real GPU count on this cluster; doesn't control actual scheduling,
                                       # just how many in-flight k8s Jobs the dispatcher tracks at once

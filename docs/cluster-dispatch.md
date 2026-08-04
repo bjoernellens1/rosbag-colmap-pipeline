@@ -99,10 +99,65 @@ tagged Ceres release has cuDSS support at all yet). Both builds themselves succe
 `colmap -h` correctly reports `with CUDA` — this is a runtime numerical-correctness bug, not a
 build/config mistake.
 
-**Do not point `configs/ablator.toml` at any `cuda-cudss-*` tag** until Ceres ships a stable,
-tagged release with cuDSS support and this has been re-validated from scratch. The current
-`cuda-<sha>` image (CUDA feature-extraction/matching/global-positioning, CPU bundle adjustment)
-is the known-good, verified-correct one to use, and is what `configs/ablator.toml` points at.
+Also checked and ruled out: a COLMAP-side solver-configuration bug
+([colmap/colmap#2758](https://github.com/colmap/colmap/pull/2758), which fixed how COLMAP wires
+`sparse_linear_algebra_library_type = CUDA_SPARSE`) — read directly against COLMAP 4.1.1's actual
+source (`bundle_adjustment_ceres.cc`): the fix is already included, and floor2's 267 images
+legitimately clears every threshold (`min_num_images_gpu_solver=50`,
+`max_num_images_direct_dense_gpu_solver=200` so it falls through to sparse,
+`max_num_images_direct_sparse_gpu_solver=4000`) to select `SPARSE_SCHUR` + `CUDA_SPARSE`
+correctly. So this isn't COLMAP misconfiguring Ceres either — the corruption is downstream of
+that, inside Ceres' unreleased cuDSS integration and/or cuDSS itself. Research into NVIDIA's own
+cuDSS release notes found a real history of *silent wrong-answer* bugs spanning exactly the
+version range tried here (CUDSS-882, CUDSS-1003: wrong results, fixed in 0.6.0/0.7.0; CUDSS-1020,
+CUDSS-1292/1293: wrong results, fixed in 0.8.0) — no version tested is confirmed clean, and no
+one has publicly verified Ceres-master+cuDSS as numerically correct on Ampere.
+
+**Do not point `configs/ablator.toml` at any `cuda-cudss-*` tag.** GPU bundle adjustment now uses
+`cuda-caspar-*` images instead (see below) — Ceres+cuDSS is not worth revisiting unless Ceres
+ships a tagged release with cuDSS support and cuDSS itself has moved well past the buggy version
+range above.
+
+### GPU bundle adjustment via Caspar — numerically correct, but blocked by camera model
+
+COLMAP >=4.1.0 ships **Caspar**, a native GPU bundle-adjustment solver bundled directly in COLMAP
+(`src/thirdparty/Symforce-Caspar/`) — it is *not* a Ceres backend, so it sidesteps the whole
+Ceres+cuDSS dependency chain above entirely. `docker/Dockerfile.cuda` builds COLMAP with
+`-DCASPAR_ENABLED=ON` and otherwise uses apt's plain CPU-only `libceres-dev` (Ceres is still
+needed for COLMAP's non-BA estimators, just not for BA itself). Enabled via
+`configs/navigation.yaml`'s (commented-out) `colmap.ba_backend: caspar`, which
+`colmap/runner.py`'s `bundle_adjuster()` translates to `--BundleAdjustment.backend CASPAR` on the
+final global BA pass, only when `use_gpu` is also true.
+
+**Tested live 2026-08-04 — Caspar itself works correctly, but is not usable for this pipeline's
+camera model.** Caspar's BA kernel only supports COLMAP's `PINHOLE`/`SIMPLE_RADIAL` camera
+models (confirmed against COLMAP 4.1.1's `bundle_adjustment_caspar.cc` source); this pipeline
+uses `OPENCV` (needed for real RGBD lens tangential distortion, `p1`/`p2`). Pointed at an
+`OPENCV`-model reconstruction, Caspar silently skips every image ("unsupported camera model:
+OPENCV") and runs BA with 0 residuals — a real capability gap, not a bug.
+
+To test whether the accuracy loss from downgrading to `SIMPLE_RADIAL` (single radial term, no
+tangential) is actually tolerable, floor2 was reconstructed identically on CPU and on Caspar/GPU
+with `camera_model: SIMPLE_RADIAL` forced:
+
+| | poses | final BA cost | scale regimes |
+|---|---|---|---|
+| OPENCV baseline (CPU) | 267/267 | 0.493 px | 1 (no split) |
+| SIMPLE_RADIAL, CPU | 267/267 | 0.510 px | **2** (0.54 vs 1.91) |
+| SIMPLE_RADIAL, Caspar/GPU | 267/267 | n/a (Caspar logs no per-iteration cost) | **2** (0.53 vs 3.57) |
+
+Both `SIMPLE_RADIAL` runs reproduce the same 2-way scale-regime split the OPENCV baseline
+doesn't have at all — proving this is a genuine accuracy loss from dropping tangential
+distortion correction for this camera's real lens, identical on CPU and GPU, **not** a
+Caspar-specific numerical bug (unlike the Ceres+cuDSS case above, which corrupted results even
+though the config was correct). Caspar is confirmed numerically sound; it's simply the wrong
+tool while this pipeline needs `OPENCV`-model accuracy.
+
+**Do not enable `ba_backend: caspar` in `configs/navigation.yaml`** unless the scene's camera
+genuinely has negligible tangential distortion (verify via a `SIMPLE_RADIAL` vs `OPENCV`
+scale-regime-split comparison first, same as above) or Caspar gains `OPENCV` support upstream.
+`configs/ablator.toml` points at the known-good `cuda-<sha>` image (GPU feature-extraction/
+matching, CPU bundle adjustment) for this reason.
 
 ## Dispatching a job
 

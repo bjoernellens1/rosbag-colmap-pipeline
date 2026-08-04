@@ -423,6 +423,19 @@ class COLMAPRunner:
             "--BundleAdjustmentCeres.max_num_iterations", str(max_iterations),
         ]
 
+        # ADDED 2026-08-04: Caspar is COLMAP's own native GPU bundle-
+        # adjustment solver (>=4.1.0, docker/Dockerfile.cuda builds with
+        # -DCASPAR_ENABLED=ON) -- NOT a Ceres/cuDSS backend, so it avoids
+        # the Ceres-master+cuDSS numerical-corruption bug found and
+        # documented in docs/cluster-dispatch.md. `--BundleAdjustmentCeres.*`
+        # flags above only apply when backend=CERES (the default); Caspar
+        # ignores them, so max_iterations has no effect in that path today
+        # (only the CLI image's build needs CASPAR_ENABLED -- a CPU-only
+        # binary silently rejects this flag, so only send it when GPU is
+        # actually requested).
+        if config.get("ba_backend") == "caspar" and config.get("use_gpu", False):
+            args.extend(["--BundleAdjustment.backend", "CASPAR"])
+
         logger.info(f"Running COLMAP bundle adjustment (max_iterations={max_iterations})...")
         result = self._run_command(args)
 
