@@ -1,0 +1,127 @@
+# ablator config for dispatching `gttool run-colmap` onto the cps-gpu-cluster
+# A100 nodes (K3s + KAI Scheduler) via the CUDA-enabled image built from
+# docker/Dockerfile.cuda. Only `run-colmap` goes to the cluster -- COLMAP's
+# feature_extractor/sequential_matcher/global_mapper stages are the only ones
+# that benefit from GPU acceleration; scale-depth/depth-ba are pure NumPy/
+# SciPy and stay a cheap local/CPU step run afterward against the same
+# NFS-resident workspace.
+#
+# Modeled directly on the sibling splatograph project's
+# ~/git/splatograph/configs/ablator.toml, which runs on this same cluster.
+#
+# Install at ~/.config/ablator/config.toml, or pass --config configs/ablator.toml
+# explicitly (recommended -- checked into the repo, can't drift).
+
+[queue]
+path = "/mnt/cps_scratch1_tmp/bjoern/rosbag-colmap-pipeline/queue/queue.jsonl"
+# log_dir defaults to the queue directory
+model_path_template = "workspaces/{name}"
+# gttool run-colmap only produces a usable model if points3D.bin actually
+# exists -- a crashed/killed run can still exit 0 (same lesson splatograph's
+# own require_result_artifact comment documents), so check the artifact, not
+# just the exit code.
+result_glob = "{model_path}/colmap/sparse/0/points3D.bin"
+require_result_artifact = true
+# Default (20 min) is too short for a COLD image pull on this cluster (no
+# image mirror/Spegel exists here -- confirmed -- so every node pulls the
+# ~11.7GB cuda image directly from GHCR on first use). The job's log file
+# only gets real content once `gttool` itself starts producing output, so
+# the stall clock effectively starts at dispatch time, not after the pull
+# -- give it enough headroom to survive a slow first pull without being
+# killed as "stalled" before it ever got a chance to run.
+hung_after_min = 45
+
+# ------------------------------------------------------------------ machines
+
+# Dispatcher's own fallback identity -- NOT a100cluster itself. Without this,
+# if a100cluster were the only [machines.*] entry it would also resolve as
+# the runner's own machine identity, silently serializing k8s dispatch
+# through the one-at-a-time bare-metal claim path instead of the concurrent
+# thread-pooled k8s path. See ablator/examples/pytorch-generic.toml's
+# [machines.local] comment for the full explanation.
+[machines.local]
+hostname_patterns = ["*"]
+
+[machines.a100cluster]
+backend = "k8s"
+namespace = "jupyterhub"             # only namespace where the scratch/persistent PVCs below are bound
+kai_queue = "batch"
+priority_class = "kai-batch-low"     # lowest, preemptible -- must stay < 100 (KAI treats >=100 as non-preemptible)
+gpu_count = 1
+mps = true                           # required: cluster GPUs run Exclusive_Process mode, first CUDA call
+                                      # fails with "device busy" on an idle GPU without this
+# FIXED 2026-08-04: cuda-cudss-9e57d32 (Ceres built with CUDA+cuDSS for GPU
+# bundle adjustment) is BROKEN -- do not use. cuDSS support only exists on
+# Ceres' unreleased `master` branch (no tagged release has it yet); live
+# on this cluster it produced a genuinely fragmented, wrong reconstruction
+# (39 disconnected trajectory segments, up to 81m apart, scale estimation
+# confidence=0) while global_mapper.log showed a self-contradictory solver
+# error: "Linear solver failure. Failed to compute a step: Success." --
+# a real bug in Ceres' in-development cuDSS integration, not a config
+# issue. Reverted to the known-good cuda-9e57d32 (GPU feature extraction/
+# matching only, CPU bundle adjustment) until Ceres ships a stable,
+# tagged cuDSS release. See docs/cluster-dispatch.md.
+image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-9e57d32"
+max_concurrent = 8                   # real GPU count on this cluster; doesn't control actual scheduling,
+                                      # just how many in-flight k8s Jobs the dispatcher tracks at once
+# FIXED 2026-08-04: NOT using pvc_scratch here (despite that being the
+# "normal" way to mount the scratch PVC) -- setting it makes ablator's
+# manifest builder ALSO auto-create a second "dataset" volume mounting the
+# SAME PVC read-only at /data/scene (build_k8s_job_manifest's `has_scratch_pvc`
+# fallback, meant for splatograph's {scene} dataset arg), even though this
+# job type never references {scene}/`/data/scene` at all. Confirmed live on
+# this cluster: a pod double-mounting one PVC (once ro, once rw) under two
+# different volume names hangs forever in ContainerCreating with ZERO events
+# (not even "Pulling image") -- reproduced with a plain busybox pod, so it's
+# a real k8s volume-manager stall on this cluster, not specific to the cuda
+# image or its size. extra_volumes mounts the PVC exactly once instead.
+extra_volumes = [
+  { name = "scratch", claim_name = "cps-scratch1-tmp-v2-pvc", mount_path = "/mnt/cps_scratch1_tmp", read_only = false },
+]
+
+# ------------------------------------------------------------ type: reconstruct
+# Runs COLMAP reconstruction only -- scale-depth/depth-ba/export stay local.
+# {scene} is the NFS-resident workspace path
+# (/mnt/cps_scratch1_tmp/bjoern/rosbag-colmap-pipeline/workspaces/<scene>),
+# {model_path} resolves via model_path_template above to the same location
+# under scratch_mount_root, so both agree on one canonical workspace path.
+
+[types.reconstruct]
+# cwd becomes the pod's workingDir (k8s backend) -- the scratch PVC mounts
+# at scratch_mount_root (default /mnt/cps_scratch1_tmp, same absolute path
+# this dev machine uses locally), so the relative {model_path}
+# ("workspaces/{name}", per [queue] model_path_template above) resolves
+# against this cwd to the exact same NFS path a local `gttool` invocation
+# would use.
+cwd = "/mnt/cps_scratch1_tmp/bjoern/rosbag-colmap-pipeline"
+# FIXED 2026-08-04: `gttool run-colmap` writes colmap/database.db (SQLite)
+# continuously throughout the run -- confirmed live on this cluster that
+# SQLite over this NFS mount fails unpredictably ("SQLite error: disk I/O
+# error", and separately a COLMAP option-validation error that looked like
+# a missing directory but wasn't) -- a well-known SQLite-over-NFS class of
+# problem (broken/partial POSIX advisory locking on many NFS clients/
+# servers), not something COLMAP or gttool did wrong. Work around by
+# copying the input data to LOCAL (node) storage first -- the pod's own
+# writable container filesystem, backed by real node disk, not a PVC/NFS
+# mount at all -- running COLMAP entirely there (correct locking, and
+# faster besides), then copying only the finished colmap/ output back to
+# the NFS workspace so the local scale-depth step (which just reads
+# points3D.bin/images.bin, no live SQLite writes) can pick it up normally.
+# /local_workspace lives in the container's own writable layer -- ephemeral,
+# node-local disk (not a PVC/NFS mount), functionally equivalent to an
+# emptyDir volume for this one-shot job without needing to add emptyDir
+# support to ablator's k8s manifest builder (today only PVC-backed
+# extra_volumes exist there).
+command = [
+  "bash", "-c",
+  """
+  set -euo pipefail
+  local_ws=/local_workspace/{id}
+  mkdir -p "$local_ws"
+  cp -r "{model_path}/rgb" "{model_path}/depth" "{model_path}/camera" "{model_path}/timestamps" "{model_path}/manifest.json" "$local_ws/"
+  gttool run-colmap "$local_ws" --config /app/configs/navigation.yaml --gpu
+  mkdir -p "{model_path}/colmap"
+  cp -r "$local_ws/colmap/." "{model_path}/colmap/"
+  cp -r "$local_ws/outputs/." "{model_path}/outputs/" 2>/dev/null || true
+  """,
+]

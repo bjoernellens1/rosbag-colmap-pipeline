@@ -1,0 +1,184 @@
+# CUDA-enabled COLMAP build for the cps-gpu-cluster A100 nodes (compute
+# capability 8.0, driver 580.95.05, CUDA runtime ceiling 13.0 -- CUDA 12.6
+# sits comfortably below that ceiling, same choice splatograph's own
+# Dockerfile.cuda made for the identical cluster). `devel`, not `base`/
+# `runtime`, because building COLMAP from source needs `nvcc`.
+FROM nvcr.io/nvidia/cuda:12.6.0-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Confirmed live (multiple build hangs, each stuck indefinitely on a
+# single apt fetch with zero progress/error): this build host has flaky/
+# congested routing specifically to Canonical's geo-DNS `archive.ubuntu.
+# com`/`security.ubuntu.com` (repeated retries/timeouts on both, on both
+# IPv4 and IPv6, at different points) -- while several named mirrors
+# (de.archive.ubuntu.com among them, tested to also carry noble-security)
+# responded fast and reliably every time. Switch to that specific mirror
+# instead of the geo-redirector, and still keep IPv4-forcing + retries as
+# defense in depth for whatever flakiness remains.
+RUN sed -i 's|archive\.ubuntu\.com|de.archive.ubuntu.com|g; s|security\.ubuntu\.com|de.archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "15";\nAcquire::https::Timeout "15";\n' > /etc/apt/apt.conf.d/99network-resilience
+
+# Same dependency list as docker/Dockerfile (CPU/ROCm image), MINUS
+# libceres-dev -- apt's Ceres is CPU-only (no CUDA, no cuDSS), so it's
+# built from source below instead for genuine GPU-accelerated bundle
+# adjustment (not just GPU feature extraction/matching).
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    git \
+    cmake \
+    ninja-build \
+    build-essential \
+    libeigen3-dev \
+    libopencv-dev \
+    libsqlite3-dev \
+    libboost-all-dev \
+    libgflags-dev \
+    libgoogle-glog-dev \
+    libatlas-base-dev \
+    libsuitesparse-dev \
+    libflann-dev \
+    libfreeimage-dev \
+    libmetis-dev \
+    libgtest-dev \
+    libgmock-dev \
+    libglew-dev \
+    qtbase5-dev \
+    libqt5opengl5-dev \
+    libcgal-dev \
+    libcgal-qt5-dev \
+    libcurl4-openssl-dev \
+    libopenimageio-dev \
+    openimageio-tools \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# NVIDIA cuDSS (CUDA Direct Sparse Solver) -- Ceres 2.2+'s GPU sparse
+# Cholesky backend for bundle adjustment needs this specifically; CUDA
+# toolkit alone only gets Ceres' GPU DENSE solver, not sparse (confirmed
+# live: "Ceres was compiled without cuDSS support. Falling back to
+# CPU-based sparse solvers." on an earlier CUDA-only build of this image).
+# No official Ubuntu 24.04 repo yet -- the 22.04 (jammy) cuda-keyring repo
+# still serves working cuDSS .debs for 24.04 (same approach documented in
+# community COLMAP+cuDSS build guides); apt only needs the package
+# metadata, not distro-specific binaries, since cuDSS itself is a
+# standalone CUDA library.
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && rm cuda-keyring_1.1-1_all.deb \
+    # cudss-static-targets.cmake is unconditionally referenced by
+    # cudss-config.cmake once the header/lib dirs resolve -- the dev
+    # package alone (shared lib + headers) isn't enough, confirmed live
+    # ("installation package was faulty ... but not all the files it
+    # references" once the header-path fix above let configuration get
+    # this far); the static variant needs to be installed alongside it
+    # even though nothing here links statically.
+    && apt-get update && apt-get install -y libcudss0-dev-cuda-12 libcudss0-static-cuda-12 \
+    && rm -rf /var/lib/apt/lists/* \
+    # cudss-config.cmake's find_path() checks a fixed set of candidates
+    # computed as `${_cudss_search_prefix}/<suffix>` where
+    # _cudss_search_prefix = REAL_PATH(CMAKE_CURRENT_LIST_DIR/../../) =
+    # /usr/lib/x86_64-linux-gnu/libcudss/12, and suffix in {../include,
+    # ../../include, ../../../include, ../../../../include (labeled "Debian/
+    # Ubuntu aarch64")} -- working through the actual path arithmetic (not
+    # guessed), those four candidates resolve to .../libcudss/include,
+    # .../x86_64-linux-gnu/include, .../lib/include, and /usr/include.
+    # NONE of them is /usr/include/libcudss/12 (where Debian's x86_64 .deb
+    # actually installs cudss.h) -- confirmed by reading the full generated
+    # cmake script directly, not assumed; two earlier guesses at the
+    # relative path (both wrong) failed with the identical error. Placing a
+    # copy of the header at the FIRST candidate the script actually checks
+    # (.../libcudss/include) fixes it without needing to patch the script.
+    && mkdir -p /usr/lib/x86_64-linux-gnu/libcudss/include \
+    && cp -r /usr/include/libcudss/12/. /usr/lib/x86_64-linux-gnu/libcudss/include/
+
+# Ceres Solver built from source with CUDA (dense) + cuDSS (sparse) GPU
+# solver support -- apt's libceres-dev has neither. Bundled abseil-cpp/
+# googletest (Ceres' own third_party/ submodule pins) instead of a plain
+# `git submodule update`, matching the exact recipe that's confirmed to
+# build cleanly against COLMAP 4.1.1's Ceres API expectations.
+# FIXED: an initially-pinned older commit (93e66f0d) predates a cuDSS API
+# break (cudaDataType_t -> cudssDataType_t, cuDSS support isn't in any
+# tagged Ceres release yet, only >=2.2.0's unstable branch) -- confirmed
+# live: it failed to compile against apt's current cuDSS (0.8.0.10) with
+# exactly that type-mismatch error. Track master instead, which follows
+# cuDSS's current API.
+ARG CERES_BUILD_JOBS=
+RUN git clone https://github.com/ceres-solver/ceres-solver.git /opt/ceres_src \
+    && cd /opt/ceres_src \
+    && cd third_party \
+    && rm -rf abseil-cpp googletest \
+    && git clone -b 20250127.1 --depth 1 https://github.com/abseil/abseil-cpp.git \
+    && git clone -b v1.16.0 --depth 1 https://github.com/google/googletest.git \
+    && cd /opt/ceres_src \
+    && mkdir build && cd build \
+    && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES=80 \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+        -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/12/cmake/cudss/ \
+    && ninja -j "${CERES_BUILD_JOBS:-$(nproc)}" \
+    && ninja install \
+    && rm -rf /opt/ceres_src
+
+# No ROCm/PyTorch base to inherit site-packages from here (unlike
+# docker/Dockerfile) -- a plain venv is enough.
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+RUN uv pip install --upgrade pip setuptools wheel
+
+# Same COLMAP 4.1.1 source build as docker/Dockerfile, with CUDA enabled
+# and the A100's compute capability (8.0) pinned explicitly --
+# CMAKE_CUDA_ARCHITECTURES autodetection needs a GPU present at build
+# time, which this build host does not have (splatograph hit exactly this
+# failure class building its own Dockerfile.cuda for the same cluster).
+ARG COLMAP_BUILD_JOBS=
+RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt/colmap_src \
+    && mkdir -p /opt/colmap_src/build \
+    && cd /opt/colmap_src/build \
+    && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=80 \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+        -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/12/cmake/cudss/ \
+    && ninja -j "${COLMAP_BUILD_JOBS:-$(nproc)}" \
+    && ninja install \
+    && rm -rf /opt/colmap_src
+
+# cuDSS's .so lives under a non-standard path
+# (/usr/lib/x86_64-linux-gnu/libcudss/12/) that apt's own postinst doesn't
+# register with ldconfig -- confirmed live: the resulting `colmap` binary
+# (now linked against libcudss.so.0) failed to even start with "error
+# while loading shared libraries: libcudss.so.0: cannot open shared
+# object file", despite the .so being present on disk. Register the path
+# explicitly.
+RUN echo /usr/lib/x86_64-linux-gnu/libcudss/12 > /etc/ld.so.conf.d/cudss.conf && ldconfig
+
+# Same vocab tree as docker/Dockerfile -- see that file's comment for why
+# this specific (faiss-format) asset, not the older flann-format one.
+RUN mkdir -p /opt/colmap_vocab_tree && \
+    curl -fsSL -o /opt/colmap_vocab_tree/vocab_tree_flickr100K_words32K.bin \
+    https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words32K.bin
+
+WORKDIR /app
+
+COPY requirements/base.txt /app/requirements/
+RUN uv pip install -r requirements/base.txt
+
+COPY pyproject.toml /app/
+COPY configs/ /app/configs/
+COPY src/ /app/src/
+RUN uv pip install -e ".[depth-ba]"
+
+LABEL org.opencontainers.image.source="https://github.com/bjoernellens1/rosbag-colmap-pipeline" \
+      org.opencontainers.image.description="CUDA-enabled COLMAP build for A100 cluster dispatch (cps-gpu-cluster)" \
+      org.opencontainers.image.licenses="MIT"
+
+ENTRYPOINT ["gttool"]
+CMD ["--help"]

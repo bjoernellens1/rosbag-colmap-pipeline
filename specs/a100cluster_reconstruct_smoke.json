@@ -1,0 +1,11 @@
+{
+  "name": "floor2",
+  "parallel": true,
+  "base": {
+    "type": "reconstruct",
+    "machine": "a100cluster"
+  },
+  "arms": [
+    {"id": "gpu"}
+  ]
+}

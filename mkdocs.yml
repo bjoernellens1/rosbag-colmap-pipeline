@@ -38,6 +38,7 @@ nav:
     - Configuration: configuration.md
   - Mapper Selection (global vs. incremental): mapper-selection.md
   - Depth-Aware Bundle Adjustment: depth-ba.md
+  - Running COLMAP on the A100 Cluster: cluster-dispatch.md
   - Workspace Structure: workspace-structure.md
   - Output Formats & Evaluation: output-formats.md
   - Limitations: limitations.md
