@@ -73,20 +73,36 @@ host has intermittent flaky routing to Canonical's geo-DNS `archive.ubuntu.com`/
 already switches to `de.archive.ubuntu.com` plus `Acquire::Retries`/short timeouts as a fix;
 if it's still stuck, check `curl -sI http://archive.ubuntu.com` directly first.
 
-### ⚠️ Do not use Ceres+cuDSS (GPU bundle adjustment) yet
+### ⚠️ Do not use Ceres+cuDSS (GPU bundle adjustment) — confirmed broken, tried twice
 
 A `Dockerfile.cuda` variant building Ceres from source with CUDA+cuDSS (NVIDIA's sparse Cholesky
-library) for genuinely GPU-accelerated bundle adjustment was attempted and **is broken** — cuDSS
-support only exists on Ceres' unreleased `master` branch (no tagged release has it), and live on
-this cluster it silently produced a corrupted reconstruction (a reconstruction that fragmented
-into 39 disconnected trajectory segments, some up to 81m apart, scale-estimation confidence 0)
-while `global_mapper.log` showed a self-contradictory solver error: `"Linear solver failure.
-Failed to compute a step: Success."` — a real bug in Ceres' in-development cuDSS integration,
-not a build/config mistake (the build itself succeeds and `colmap -h` reports `with CUDA`
-correctly). **Do not point `configs/ablator.toml` at a `cuda-cudss-*` tag** until Ceres ships a
-stable, tagged release with cuDSS support and this has been re-validated. The current
-`cuda-<sha>` image (CUDA feature-extraction/matching, CPU bundle adjustment) is the
-known-good, verified-correct one to use.
+library) for genuinely GPU-accelerated bundle adjustment (not just feature extraction/matching)
+was attempted **twice, with two different cuDSS versions, and both are broken**:
+
+1. **Attempt 1**: apt's cuDSS `0.8.0.10`. Live on the cluster, produced a corrupted
+   reconstruction — trajectory fragmented into 39 disconnected segments, some up to 81m apart,
+   scale-estimation confidence 0.
+2. **Attempt 2**: after deep research identified that Ceres' unreleased cuDSS integration is
+   only ever CI-tested against cuDSS `0.3.0.9` (five versions behind what apt shipped), rebuilt
+   against NVIDIA's official `0.3.0.9` tarball instead — Ceres' own CI-pinned version. **Still
+   broken**, and worse: 39-40 disconnected segments, some up to *201m* apart, scale confidence 0
+   again.
+
+Both attempts hit the identical self-contradictory Ceres log line: `"Linear solver failure.
+Failed to compute a step: Success."` This rules out a simple cuDSS-version mismatch as the root
+cause — since the exact CI-validated version reproduces the same corruption, this is a deeper,
+currently-unresolved problem in Ceres' unreleased cuDSS integration itself (see
+[ceres-solver/ceres-solver#1079](https://github.com/ceres-solver/ceres-solver/issues/1079) for a
+related open upstream bug about cuDSS persisting numerical-factorization-error state across
+calls, and [#1161](https://github.com/ceres-solver/ceres-solver/issues/1161) confirming no
+tagged Ceres release has cuDSS support at all yet). Both builds themselves succeed cleanly and
+`colmap -h` correctly reports `with CUDA` — this is a runtime numerical-correctness bug, not a
+build/config mistake.
+
+**Do not point `configs/ablator.toml` at any `cuda-cudss-*` tag** until Ceres ships a stable,
+tagged release with cuDSS support and this has been re-validated from scratch. The current
+`cuda-<sha>` image (CUDA feature-extraction/matching/global-positioning, CPU bundle adjustment)
+is the known-good, verified-correct one to use, and is what `configs/ablator.toml` points at.
 
 ## Dispatching a job
 

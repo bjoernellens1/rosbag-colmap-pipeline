@@ -63,39 +63,44 @@ RUN apt-get update && apt-get install -y \
 # toolkit alone only gets Ceres' GPU DENSE solver, not sparse (confirmed
 # live: "Ceres was compiled without cuDSS support. Falling back to
 # CPU-based sparse solvers." on an earlier CUDA-only build of this image).
-# No official Ubuntu 24.04 repo yet -- the 22.04 (jammy) cuda-keyring repo
-# still serves working cuDSS .debs for 24.04 (same approach documented in
-# community COLMAP+cuDSS build guides); apt only needs the package
-# metadata, not distro-specific binaries, since cuDSS itself is a
-# standalone CUDA library.
-RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && rm cuda-keyring_1.1-1_all.deb \
-    # cudss-static-targets.cmake is unconditionally referenced by
-    # cudss-config.cmake once the header/lib dirs resolve -- the dev
-    # package alone (shared lib + headers) isn't enough, confirmed live
-    # ("installation package was faulty ... but not all the files it
-    # references" once the header-path fix above let configuration get
-    # this far); the static variant needs to be installed alongside it
-    # even though nothing here links statically.
-    && apt-get update && apt-get install -y libcudss0-dev-cuda-12 libcudss0-static-cuda-12 \
-    && rm -rf /var/lib/apt/lists/* \
-    # cudss-config.cmake's find_path() checks a fixed set of candidates
-    # computed as `${_cudss_search_prefix}/<suffix>` where
-    # _cudss_search_prefix = REAL_PATH(CMAKE_CURRENT_LIST_DIR/../../) =
-    # /usr/lib/x86_64-linux-gnu/libcudss/12, and suffix in {../include,
-    # ../../include, ../../../include, ../../../../include (labeled "Debian/
-    # Ubuntu aarch64")} -- working through the actual path arithmetic (not
-    # guessed), those four candidates resolve to .../libcudss/include,
-    # .../x86_64-linux-gnu/include, .../lib/include, and /usr/include.
-    # NONE of them is /usr/include/libcudss/12 (where Debian's x86_64 .deb
-    # actually installs cudss.h) -- confirmed by reading the full generated
-    # cmake script directly, not assumed; two earlier guesses at the
-    # relative path (both wrong) failed with the identical error. Placing a
-    # copy of the header at the FIRST candidate the script actually checks
-    # (.../libcudss/include) fixes it without needing to patch the script.
-    && mkdir -p /usr/lib/x86_64-linux-gnu/libcudss/include \
-    && cp -r /usr/include/libcudss/12/. /usr/lib/x86_64-linux-gnu/libcudss/include/
+#
+# PINNED to 0.3.0.9 via NVIDIA's direct tarball, NOT apt's current
+# 0.8.0.10 -- apt's latest silently produced a CORRUPTED reconstruction
+# (confirmed live on a real scene: trajectory fragmented into 39
+# disconnected segments up to 81m apart) with a self-contradictory Ceres
+# log line ("Linear solver failure. Failed to compute a step: Success.").
+# Root-caused via deep research, not guessed: Ceres master's cuDSS
+# integration (still unreleased -- no tagged release has cuDSS support at
+# all, see ceres-solver/ceres-solver#1161) is only ever CI-tested against
+# cuDSS 0.3.0.9 (see ceres-solver's own .github/workflows/linux.yml,
+# which fetches exactly this tarball/version) -- apt's 0.8.0.10 is five
+# minor versions past anything Ceres' integration code has ever been
+# validated against, no version pin/check exists in Ceres' CMakeLists.txt
+# to catch the mismatch. A related open upstream bug
+# (ceres-solver/ceres-solver#1079) documents cuDSS persisting numerical-
+# factorization-error state across calls unless the whole cuDSS context is
+# reset -- plausible contributor, unverified against 0.8.x. The tarball's
+# own directory layout (include/, lib/, lib/cmake/cudss/) also matches
+# what cudss-config.cmake expects natively -- no header-path workaround
+# needed here, unlike the apt .deb's non-matching Debian FHS layout.
+RUN wget -q https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz \
+    && mkdir -p /opt/cudss \
+    && tar -xf libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz -C /opt/cudss --strip-components=1 \
+    && rm libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz \
+    && echo /opt/cudss/lib > /etc/ld.so.conf.d/cudss.conf \
+    && ldconfig \
+    # cuDSS's shipped cudss-config-version.cmake doesn't correctly report
+    # its own version to CMake's find_package version-compatibility check
+    # (confirmed live: COLMAP's build failed with "Could not find a
+    # configuration file for package cudss that is compatible with
+    # requested version 0.3.0" / "version: unknown" even though the exact
+    # right package IS present at that exact path) -- a known class of
+    # issue with this vendor's cmake packaging (see ceres-solver/
+    # ceres-solver#1125, #1151). Replace it with a minimal, always-
+    # compatible version file -- safe here since we control both sides
+    # (Ceres was built against this exact cuDSS install already).
+    && printf 'set(PACKAGE_VERSION "0.3.0.9")\nset(PACKAGE_VERSION_EXACT FALSE)\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\nset(PACKAGE_VERSION_UNSUITABLE FALSE)\n' \
+       > /opt/cudss/lib/cmake/cudss/cudss-config-version.cmake
 
 # Ceres Solver built from source with CUDA (dense) + cuDSS (sparse) GPU
 # solver support -- apt's libceres-dev has neither. Bundled abseil-cpp/
@@ -120,7 +125,7 @@ RUN git clone https://github.com/ceres-solver/ceres-solver.git /opt/ceres_src \
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES=80 \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/12/cmake/cudss/ \
+        -Dcudss_DIR=/opt/cudss/lib/cmake/cudss/ \
     && ninja -j "${CERES_BUILD_JOBS:-$(nproc)}" \
     && ninja install \
     && rm -rf /opt/ceres_src
@@ -146,19 +151,10 @@ RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \
         -DCMAKE_CUDA_ARCHITECTURES=80 \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -Dcudss_DIR=/usr/lib/x86_64-linux-gnu/libcudss/12/cmake/cudss/ \
+        -Dcudss_DIR=/opt/cudss/lib/cmake/cudss/ \
     && ninja -j "${COLMAP_BUILD_JOBS:-$(nproc)}" \
     && ninja install \
     && rm -rf /opt/colmap_src
-
-# cuDSS's .so lives under a non-standard path
-# (/usr/lib/x86_64-linux-gnu/libcudss/12/) that apt's own postinst doesn't
-# register with ldconfig -- confirmed live: the resulting `colmap` binary
-# (now linked against libcudss.so.0) failed to even start with "error
-# while loading shared libraries: libcudss.so.0: cannot open shared
-# object file", despite the .so being present on disk. Register the path
-# explicitly.
-RUN echo /usr/lib/x86_64-linux-gnu/libcudss/12 > /etc/ld.so.conf.d/cudss.conf && ldconfig
 
 # Same vocab tree as docker/Dockerfile -- see that file's comment for why
 # this specific (faiss-format) asset, not the older flann-format one.
