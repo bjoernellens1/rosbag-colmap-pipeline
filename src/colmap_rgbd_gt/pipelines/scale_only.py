@@ -12,7 +12,8 @@ from colmap_rgbd_gt.export.evo import plot_trajectory
 from colmap_rgbd_gt.export.report import generate_report, save_report
 from colmap_rgbd_gt.export.scene_metadata import compute_scene_metadata, save_scene_metadata
 from colmap_rgbd_gt.export.rosbag_writer import _load_frame_timestamps
-from colmap_rgbd_gt.colmap.pose_outliers import filter_disconnected_trajectory_segments
+from colmap_rgbd_gt.colmap.pose_outliers import filter_disconnected_trajectory_segments, assess_fragmentation_severity
+from colmap_rgbd_gt.scaling.trajectory_sanity import check_trajectory_plausibility
 from colmap_rgbd_gt.dataset.schema import Workspace
 
 logger = get_logger(__name__)
@@ -294,6 +295,69 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         save_scene_metadata(scene_metadata, ws.layout.outputs / "scene_metadata.json")
     except Exception as e:
         logger.warning(f"Could not compute scene metadata: {e}")
+
+    # Fail-safe gate (2026-08-05, root-caused on kitchen1): the QC checks
+    # above (pose_filter_result, scale-regime correction) can detect a real,
+    # unresolved problem (action_taken=False on an ambiguous/ severe split)
+    # without that ever stopping the pipeline from reporting success --
+    # export_report.json still showed registered_images=361/no errors while
+    # the exported trajectory was 43 spatially-disconnected segments up to
+    # 12.35m apart. Two independent, cause-agnostic checks: the segment
+    # filter's own unresolved result (assess_fragmentation_severity) and a
+    # trajectory-vs-its-own-extent plausibility check (check_trajectory_
+    # plausibility) that catches incoherent trajectories even when they
+    # don't cleanly separate into detectable segments.
+    frag_severe, frag_reason = (False, "no pose filter result")
+    if pose_filter_result is not None:
+        frag_severe, frag_reason = assess_fragmentation_severity(pose_filter_result)
+
+    try:
+        frame_id_to_ts_ns_sanity = _load_frame_timestamps(ws.layout.timestamps / "rgb.csv")
+    except Exception:
+        frame_id_to_ts_ns_sanity = None
+    plausibility = check_trajectory_plausibility(metric_trajectory, frame_id_to_ts_ns_sanity)
+
+    sanity_passed = not frag_severe and not plausibility.severe
+    try:
+        import json
+        with open(ws.layout.outputs / "trajectory_sanity.json", "w") as f:
+            json.dump({
+                "passed": sanity_passed,
+                "fragmentation": {"severe": frag_severe, "reason": frag_reason},
+                "plausibility": {
+                    "severe": plausibility.severe,
+                    "reason": plausibility.reason,
+                    "bbox_diagonal_m": plausibility.bbox_diagonal_m,
+                    "path_length_m": plausibility.path_length_m,
+                    "path_to_extent_ratio": plausibility.path_to_extent_ratio,
+                    "max_step_m": plausibility.max_step_m,
+                    "max_step_speed_mps": plausibility.max_step_speed_mps,
+                },
+            }, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save trajectory_sanity.json: {e}")
+
+    if not sanity_passed:
+        message = (
+            f"Trajectory sanity check FAILED -- fragmentation: {frag_reason}; "
+            f"plausibility: {plausibility.reason}. See trajectory_sanity.json."
+        )
+        logger.error(message)
+        if report is not None:
+            report.errors.append(message)
+            try:
+                save_report(report, ws.layout.outputs / "export_report.json")
+            except Exception as e:
+                logger.warning(f"Could not re-save export_report.json with sanity error: {e}")
+
+        allow_unsafe = bool(scaling_config.get("allow_unsafe_trajectory", False))
+        if not allow_unsafe:
+            logger.error(
+                "Refusing to report success for an unsafe trajectory. Pass "
+                "--allow-unsafe-trajectory to override after manual review."
+            )
+            return False
+        logger.warning("--allow-unsafe-trajectory set: proceeding despite the failed sanity check.")
 
     logger.info(f"Scale pipeline complete: scale={scale_estimate.scale:.6f}")
     return True

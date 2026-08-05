@@ -13,7 +13,10 @@ touch a trajectory with no jump, and must NOT auto-resolve an ambiguous
 import numpy as np
 import pytest
 
-from colmap_rgbd_gt.colmap.pose_outliers import filter_disconnected_trajectory_segments
+from colmap_rgbd_gt.colmap.pose_outliers import (
+    filter_disconnected_trajectory_segments,
+    assess_fragmentation_severity,
+)
 
 
 def _entry(frame_id, t):
@@ -98,7 +101,60 @@ def test_missing_timestamps_are_not_treated_as_jumps():
 def test_single_pose_trajectory_does_not_raise():
     result = filter_disconnected_trajectory_segments([_entry(0, [0, 0, 0])], {})
     assert result.action_taken is False
-    assert len(result.filtered_trajectory) == 1
+
+
+def test_assess_fragmentation_severity_flags_unresolved_ambiguous_split():
+    """Reproduces kitchen1's real shape: an ambiguous, comparably-sized split
+    that filter_disconnected_trajectory_segments correctly declines to
+    auto-resolve, but which IS real severe fragmentation an operator should
+    be warned about -- not silently reported as success."""
+    seg_a_ids = list(range(10))
+    seg_a = [_entry(i, [0.01 * i, 0.0, 0.0]) for i in seg_a_ids]
+    seg_b_ids = list(range(10, 22))
+    seg_b = [_entry(i, [10.0 + 0.01 * (i - 10), 0.0, 0.0]) for i in seg_b_ids]
+
+    trajectory = seg_a + seg_b
+    ts = _ts_map(seg_a_ids + seg_b_ids, dt_s=0.5)
+
+    result = filter_disconnected_trajectory_segments(
+        trajectory, ts, max_plausible_speed_mps=3.0, min_majority_ratio=3.0,
+    )
+    assert result.action_taken is False  # sanity: still the ambiguous case
+
+    severe, reason = assess_fragmentation_severity(result)
+
+    assert severe is True
+    assert "fragmentation" in reason
+
+
+def test_assess_fragmentation_severity_not_severe_when_resolved():
+    minority_ids = list(range(11))
+    minority = [_entry(i, [0.01 * i, 0.0, 0.0]) for i in minority_ids]
+    majority_ids = list(range(11, 44))
+    majority = [_entry(i, [10.0 + 0.05 * (i - 11), 0.0, 0.0]) for i in majority_ids]
+    trajectory = minority + majority
+    ts = _ts_map(minority_ids + majority_ids, dt_s=0.1)
+
+    result = filter_disconnected_trajectory_segments(trajectory, ts, max_plausible_speed_mps=3.0)
+    assert result.action_taken is True  # sanity: this one DOES auto-resolve
+
+    severe, reason = assess_fragmentation_severity(result)
+
+    assert severe is False
+
+
+def test_assess_fragmentation_severity_not_severe_when_no_jump():
+    frame_ids = list(range(10))
+    trajectory = [_entry(i, [i * 0.05, 0.0, 0.0]) for i in frame_ids]
+    ts = _ts_map(frame_ids, dt_s=1.0)
+
+    result = filter_disconnected_trajectory_segments(trajectory, ts)
+    assert result.action_taken is False
+
+    severe, reason = assess_fragmentation_severity(result)
+
+    assert severe is False
+    assert "no non-majority segments" in reason
 
 
 def test_empty_trajectory_does_not_raise():

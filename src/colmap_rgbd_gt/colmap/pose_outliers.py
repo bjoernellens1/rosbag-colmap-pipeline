@@ -292,3 +292,63 @@ def filter_disconnected_trajectory_segments(
         ),
         spatially_merged_frame_ids=spatially_merged_frame_ids,
     )
+
+
+DEFAULT_MAX_UNRESOLVED_DISTANCE_M = 2.0
+DEFAULT_MAX_UNRESOLVED_FRAME_FRAC = 0.05
+
+
+def assess_fragmentation_severity(
+    result: SegmentFilterResult,
+    max_unresolved_distance_m: float = DEFAULT_MAX_UNRESOLVED_DISTANCE_M,
+    max_unresolved_frame_frac: float = DEFAULT_MAX_UNRESOLVED_FRAME_FRAC,
+) -> tuple[bool, str]:
+    """Decide whether an UNRESOLVED (action_taken=False) segment-filter result
+    represents real, severe trajectory fragmentation that should hard-fail the
+    pipeline rather than silently ship as a "successful" export.
+
+    Root-caused on a real scene (kitchen1, 2026-08-05): global_mapper's
+    global-positioning solve (robust-loss based) can down-weight genuinely
+    weak connecting edges as statistical outliers, letting locally-consistent
+    sub-regions settle at globally wrong positions while still reporting
+    clean Ceres convergence -- the exact mechanism `filter_disconnected_
+    trajectory_segments` above was built to catch (2026-08-03, floor2), but
+    that fix is deliberately conservative (only auto-drops when one segment
+    dominates >= min_majority_ratio) and leaves an ambiguous split
+    (action_taken=False) completely unflagged downstream. kitchen1's real
+    numbers: 43 segments, up to 12.35m apart, no dominant majority (only
+    214-vs-147) -- action_taken stayed False and export_report.json still
+    reported success, so a training run consumed the corrupted trajectory
+    as if it were valid ground truth.
+
+    Not severe if the filter already resolved things (action_taken=True) or
+    found no non-majority segments at all. Severe only when BOTH the worst
+    unresolved segment's distance from the majority AND the total affected
+    frame fraction clear their thresholds -- guards against flagging a
+    single harmless outlier frame while still catching kitchen1-scale
+    fragmentation with headroom before these thresholds need retuning.
+    """
+    if result.action_taken:
+        return False, "already auto-resolved"
+
+    non_majority = [s for s in result.segments if "min_distance_to_majority_m" in s]
+    if not non_majority:
+        return False, "no non-majority segments"
+
+    max_distance = max(s["min_distance_to_majority_m"] for s in non_majority)
+    total_frames = sum(s["n_frames"] for s in result.segments)
+    affected_frames = sum(s["n_frames"] for s in non_majority)
+    affected_frac = affected_frames / total_frames if total_frames else 0.0
+
+    if max_distance > max_unresolved_distance_m and affected_frac > max_unresolved_frame_frac:
+        return True, (
+            f"unresolved trajectory fragmentation: {len(non_majority)} non-majority segment(s) "
+            f"totaling {affected_frames}/{total_frames} frames ({affected_frac:.1%}), worst "
+            f"segment {max_distance:.2f}m from the majority (threshold "
+            f"{max_unresolved_distance_m}m/{max_unresolved_frame_frac:.0%}) -- filter's own "
+            f"reason: {result.reason!r}"
+        )
+    return False, (
+        f"unresolved but below severity threshold (max_distance={max_distance:.2f}m, "
+        f"affected_frac={affected_frac:.1%})"
+    )

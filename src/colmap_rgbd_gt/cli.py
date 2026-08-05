@@ -251,6 +251,12 @@ def scale_depth(
     workspace: Path = typer.Argument(..., help="Path to workspace directory"),
     method: str = typer.Option("umeyama", "--method", "-m", help="Scale estimation method (median, umeyama, ransac)"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration YAML file (scaling: section only is used)"),
+    allow_unsafe_trajectory: bool = typer.Option(
+        False, "--allow-unsafe-trajectory",
+        help="Proceed even if the trajectory sanity check (unresolved segment fragmentation "
+             "or an implausible path-length/extent ratio) fails, instead of hard-failing the "
+             "pipeline. Only use after manually reviewing trajectory_sanity.json.",
+    ),
 ) -> None:
     """
     Estimate metric scale from depth data.
@@ -280,6 +286,8 @@ def scale_depth(
         import yaml
         config_dict = yaml.safe_load(config.read_text()) or {}
     config_dict.setdefault("scaling", {})["method"] = method
+    if allow_unsafe_trajectory:
+        config_dict.setdefault("scaling", {})["allow_unsafe_trajectory"] = True
 
     console.print(f"[cyan]Estimating scale for: {workspace}[/cyan]")
     if config:
@@ -428,6 +436,12 @@ def full_pipeline(
     depth_topic: Optional[str] = typer.Option(None, "--depth", help="Depth topic name"),
     camera_info_topic: Optional[str] = typer.Option(None, "--camera-info", help="Camera info topic name"),
     depth_ba: Optional[bool] = typer.Option(None, "--depth-ba/--no-depth-ba", help="Run depth-aware bundle adjustment after scale estimation (requires the 'depth-ba' extra). Overrides the config file's depth_ba.enabled; omit to use whatever the config says (default.yaml ships with it enabled)."),
+    allow_unsafe_trajectory: bool = typer.Option(
+        False, "--allow-unsafe-trajectory",
+        help="Proceed even if the trajectory sanity check (unresolved segment fragmentation "
+             "or an implausible path-length/extent ratio) fails, instead of hard-failing the "
+             "pipeline. Only use after manually reviewing trajectory_sanity.json.",
+    ),
     log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level"),
 ) -> None:
     """
@@ -459,6 +473,8 @@ def full_pipeline(
         config_dict.setdefault("topics", {})["camera_info"] = camera_info_topic
     if depth_ba is not None:
         config_dict.setdefault("depth_ba", {})["enabled"] = depth_ba
+    if allow_unsafe_trajectory:
+        config_dict.setdefault("scaling", {})["allow_unsafe_trajectory"] = True
 
     from colmap_rgbd_gt.pipelines.full_pipeline import full_pipeline as run_full
 
