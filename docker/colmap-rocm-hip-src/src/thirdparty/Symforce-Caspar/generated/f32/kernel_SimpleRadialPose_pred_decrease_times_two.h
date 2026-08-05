@@ -1,0 +1,17 @@
+#pragma once
+
+#include "cuda_to_hip.h"
+
+#include "shared_indices.h"
+
+namespace caspar {
+
+void SimpleRadialPosePredDecreaseTimesTwo(
+    float *SimpleRadialPose_step, unsigned int SimpleRadialPose_step_num_alloc,
+    float *SimpleRadialPose_precond_diag,
+    unsigned int SimpleRadialPose_precond_diag_num_alloc,
+    const float *const diag, float *SimpleRadialPose_njtr,
+    unsigned int SimpleRadialPose_njtr_num_alloc,
+    float *const out_SimpleRadialPose_pred_dec, size_t problem_size);
+
+} // namespace caspar

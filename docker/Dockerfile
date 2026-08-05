@@ -1,8 +1,24 @@
-# ROCm 7.2 + PyTorch base (Ubuntu 24.04, Python 3.12) -- reused so this
-# image inherits a working ROCm/HIP + PyTorch stack for future GPU-accelerated
-# experimentation (e.g. a PyTorch/Kornia depth-BA backend), even though the
-# default depth-ba stage (kornia-rs) is CPU-only today.
+# HIP-enabled COLMAP build for local AMD GPU dispatch (default local backend,
+# tested on gfx1151, Radeon 8060S) -- alongside docker/Dockerfile.cuda (A100
+# cluster dispatch, untouched). Same ROCm/PyTorch base as before, but builds
+# COLMAP from source with HIP_ENABLED + CASPAR_ENABLED instead of `apt-get
+# install colmap` (CPU-only on Ubuntu 24.04, and predates GLOMAP/global_mapper
+# anyway).
+#
+# COLMAP source comes from docker/colmap-rocm-hip-src/ -- a plain copy (not a
+# git submodule) of bjoernellens1/colmap's `hip-integration` branch at commit
+# 0b079c55 ("docs: verify Caspar-HIP OpenCV distortion model against real TUM
+# fr1 data"), the exact tested state: HIP-accelerated SiftGPU (feature
+# extraction/matching), patch_match_stereo, and Caspar bundle adjustment
+# (native OpenCV camera-model support included), all verified end-to-end on
+# real data on gfx1151. Copied rather than `git clone`d at build time because
+# this exact worktree state is the one that was actually tested -- cloning
+# the branch at build time would pick up whatever HEAD happens to be if
+# anyone pushes more commits later. Re-sync with:
+#   rsync -a --exclude='.git' --exclude=build <worktree>/ docker/colmap-rocm-hip-src/
 FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+
+ARG ROCM_ARCH=gfx1151
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -10,7 +26,10 @@ ENV PYTHONUNBUFFERED=1
 
 # The base image is optimized for PyTorch/ROCm, not general C++ builds --
 # COLMAP's build/runtime deps are not guaranteed present, so install them
-# explicitly regardless of what the base ships.
+# explicitly regardless of what the base ships. Keeping libceres-dev: Caspar
+# only accelerates the BA hot path (per docker/Dockerfile.cuda's comment on
+# the identical CUDA case), COLMAP's other Ceres-backed code paths
+# (feature-matching geometry, non-BA estimators) still need it.
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
@@ -54,68 +73,35 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 RUN uv pip install --upgrade pip setuptools wheel
 
-# COLMAP built from source, PINNED to release tag 4.1.1 (not `main` --
-# reproducible builds, not "whatever HEAD happened to be").
+# COLMAP built from source with HIP + Caspar (GPU bundle adjustment, native
+# OpenCV camera-model support, no image preprocessing needed -- same reasoning
+# as docker/Dockerfile.cuda's Caspar section, just on colmap-rocm's HIP port
+# instead of upstream CUDA). CMAKE_HIP_ARCHITECTURES pinned to gfx1151
+# (ROCM_ARCH build arg) -- this host's actual GPU, not autodetected (mirrors
+# colmap-rocm's own top-level Dockerfile). Override with
+# `--build-arg ROCM_ARCH=<your-gfx-target>` for a different AMD GPU.
 #
-# 2026-08-02: was `apt-get install -y colmap`, which on Ubuntu 24.04 (noble)
-# resolves to 3.9.1 -- predates COLMAP's merge of the GLOMAP global-SfM
-# pipeline (`global_mapper` / `automatic_reconstructor --mapper GLOBAL`,
-# landed in 4.0.0). Rebuilt from source after a real production incident
-# this session: `colmap mapper` (incremental SfM) on a 2056-frame kitchen
-# scene ran for 10+ CPU-hours without finishing, showing genuine numerical
-# ill-conditioning (a bundle-adjustment round with cost frozen across 13+
-# iterations after a "Matrix not positive definite" CHOLMOD warning, not
-# just "big job, needs more time"). `global_mapper` on the IDENTICAL
-# database.db reconstructed the SAME scene -- 100% of frames registered
-# into ONE connected model (no fragmentation, unlike this session's earlier
-# hallway-scene incremental-mapper run which split into 5 disconnected
-# models with only ~10% of frames in the largest one) -- in nine 2894.87s
-# (~48 minutes) end-to-end, reusing the exact same feature_extractor +
-# sequential_matcher stages/database format (GLOMAP's global positioning +
-# bundle adjustment reads/writes the same COLMAP database and sparse-model
-# format, confirmed empirically, not just per upstream docs).
-#
-# Requires OpenImageIO (new hard dependency in 4.x, absent in 3.9.1's build
-# graph) -- libopenimageio-dev alone is insufficient, its CMake config
-# references /usr/bin/iconvert which only openimageio-tools installs; found
-# by a real configure-time failure, not assumed. CUDA disabled (no GPU
-# passthrough assumed for this pipeline's default CPU-first design; ROCm/HIP
-# is a separate, unrelated toolchain COLMAP itself doesn't use). GUI/Qt5
-# deps kept even though this pipeline never launches the GUI, because
-# COLMAP's CMake unconditionally links colmap_ui into the `colmap` binary
-# unless GUI_ENABLED=OFF is passed; not itself disabled here to keep this
-# build path closer to a stock invocation (revisit if image size becomes a
-# real problem later).
 # COLMAP_BUILD_JOBS: defaults to nproc, but override at build time
 # (`--build-arg COLMAP_BUILD_JOBS=12`) to avoid starving other CPU-heavy
-# jobs sharing the same host during the build -- this compile is
-# genuinely heavy (~300 translation units including PoseLib/faiss/
-# onnxruntime fetched via CMake FetchContent).
+# jobs sharing the same host during the build.
 ARG COLMAP_BUILD_JOBS=
-RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt/colmap_src \
-    && mkdir -p /opt/colmap_src/build \
+COPY docker/colmap-rocm-hip-src /opt/colmap_src
+RUN mkdir -p /opt/colmap_src/build \
     && cd /opt/colmap_src/build \
-    && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=OFF \
+    && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
+        -DHIP_ENABLED=ON \
+        -DCUDA_ENABLED=OFF \
+        -DCMAKE_HIP_ARCHITECTURES=${ROCM_ARCH} \
+        -DCASPAR_ENABLED=ON \
     && ninja -j "${COLMAP_BUILD_JOBS:-$(nproc)}" \
     && ninja install \
     && rm -rf /opt/colmap_src
 
-# Pretrained vocab tree for COLMAP's sequential-matcher loop detection --
-# reconnects frames whose overlap with their immediate temporal neighbors
-# has dropped (fast motion, low-texture stretches) by re-matching against
-# visually-similar past frames, not just a linear window. Baked in at
-# build time so no runtime network access is needed. 32K-word tree: sized
-# for hundreds-to-low-thousands of images, matching this pipeline's scale.
-#
-# FIXED 2026-08-02: was vocab_tree_flickr100K_words32K.bin (no "faiss" in
-# the name) -- COLMAP switched its vocab-tree index format from flann to
-# faiss in May 2025; the pre-May-2025-named asset is the OLD flann-format
-# file (still hosted for backward compat), which now crashes 4.1.1's
-# reader outright: "Check failed: file_version == 1 || file_version == 2
-# ... This may be caused by reading a legacy flann-based index." Found via
-# a real `run-colmap` crash, not assumed from the changelog. Same release
-# (3.11.1) also hosts the faiss-format file under a distinctly-prefixed
-# name -- use that one.
+# Pretrained vocab tree for COLMAP's sequential-matcher loop detection.
+# FIXED 2026-08-02: use the faiss-format asset (COLMAP switched its
+# vocab-tree index format from flann to faiss in May 2025); the
+# pre-May-2025-named asset is the old flann-format file and crashes 4.x's
+# reader outright.
 RUN mkdir -p /opt/colmap_vocab_tree && \
     curl -fsSL -o /opt/colmap_vocab_tree/vocab_tree_flickr100K_words32K.bin \
     https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words32K.bin
@@ -137,12 +123,9 @@ RUN uv pip install -e ".[depth-ba]"
 # ecosystem's other images (splatograph-orbslam3/Dockerfile). Placed at the
 # end (not near FROM) deliberately -- a LABEL this late is its own cheap
 # layer and doesn't invalidate the expensive from-source COLMAP build cache
-# above it. docker/metadata-action@v5 (wired into
-# .github/workflows/build-image.yml) sets this automatically on a CI-built
-# image too, but it's also needed here for a manual `podman
-# build`/`podman push` from a dev machine to get the same linkage.
+# above it.
 LABEL org.opencontainers.image.source="https://github.com/bjoernellens1/rosbag-colmap-pipeline" \
-      org.opencontainers.image.description="Docker-based pipeline for converting rosbag recordings to metric pseudo-ground-truth trajectories using COLMAP and depth-based scaling" \
+      org.opencontainers.image.description="HIP-accelerated COLMAP build (default local backend) for converting rosbag recordings to metric pseudo-ground-truth trajectories" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["gttool"]
