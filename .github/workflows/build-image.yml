@@ -82,6 +82,12 @@ jobs:
           sudo rm -rf /var/lib/docker/*
           sudo systemctl start docker
           sudo systemctl start docker.socket
+          # Docker itself creates data-root/tmp/ lazily on first use, but
+          # buildx's first BuildKit image pull races that and fails with
+          # "open /var/lib/docker/tmp/GetImageBlob...: no such file or
+          # directory" if the daemon hasn't created it yet. Create it
+          # explicitly right after the daemon is up, before buildx touches it.
+          sudo mkdir -p /var/lib/docker/tmp
           sudo docker info | head -20
 
       - name: Checkout repository
