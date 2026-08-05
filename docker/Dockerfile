@@ -7,11 +7,17 @@
 #
 # COLMAP source comes from docker/colmap-rocm-hip-src/ -- a plain copy (not a
 # git submodule) of bjoernellens1/colmap's `hip-integration` branch at commit
-# 0b079c55 ("docs: verify Caspar-HIP OpenCV distortion model against real TUM
-# fr1 data"), the exact tested state: HIP-accelerated SiftGPU (feature
+# d6824820 ("docs: document root cause and fix for Caspar-HIP OPENCV nan
+# bug"), the exact tested state: HIP-accelerated SiftGPU (feature
 # extraction/matching), patch_match_stereo, and Caspar bundle adjustment
-# (native OpenCV camera-model support included), all verified end-to-end on
-# real data on gfx1151. Copied rather than `git clone`d at build time because
+# (native OpenCV camera-model support included). UPDATED 2026-08-05 from the
+# earlier-vendored 0b079c55: that commit's Caspar-HIP OPENCV bundle
+# adjustment path had a real bug (uninitialized score-accumulator read on
+# padding-lane threads in two OpenCV-specific score kernels -- silently
+# converged after 3 iterations with unchanged output instead of doing real
+# optimization work), root-caused and fixed at b5ead5a9, see
+# docs/local-hip-run.md for the full writeup. Verified end-to-end on real
+# data on gfx1151. Copied rather than `git clone`d at build time because
 # this exact worktree state is the one that was actually tested -- cloning
 # the branch at build time would pick up whatever HEAD happens to be if
 # anyone pushes more commits later. Re-sync with:
