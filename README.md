@@ -24,14 +24,21 @@ gttool full data/raw/session01.bag --config configs/default.yaml
 
 Output: `data/workspaces/session01/outputs/trajectory_metric_tum.txt`
 
+`docker/Dockerfile` builds COLMAP from source with HIP acceleration for a local AMD GPU
+(tested on gfx1151; override the GPU target with `--build-arg ROCM_ARCH=<your-gfx-target>`) —
+this is the default local backend. See [Running COLMAP Locally on an AMD
+GPU](docs/local-hip-run.md) for build/run details and GPU passthrough flags. On a host without a
+supported AMD GPU, `gttool` still runs the same way, just without `--gpu` passed to `run-colmap`
+(COLMAP falls back to CPU).
+
 A prebuilt image is also published to `ghcr.io/bjoernellens1/colmap-rgbd-gt:latest`
 on every push to `main` — `docker compose -f docker/docker-compose.yml run gttool ...`
 pulls it automatically rather than rebuilding locally.
 
-For scenes where CPU-only COLMAP is too slow, `docker/Dockerfile.cuda` builds a CUDA-enabled
-image (`ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-*`) that can be dispatched to a Kubernetes
-A100 cluster via `ablator` (vendored as a git submodule — `git submodule update --init ablator`)
-instead of running locally. See [Running COLMAP on the A100
+For dispatching to a GPU cluster instead of running locally, `docker/Dockerfile.cuda` builds a
+CUDA-enabled image (`ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-*`) that can be dispatched to a
+Kubernetes A100 cluster via `ablator` (vendored as a git submodule — `git submodule update --init
+ablator`). See [Running COLMAP on the A100
 Cluster](https://bjoernellens1.github.io/rosbag-colmap-pipeline/cluster-dispatch/).
 
 See the docs for full details:
