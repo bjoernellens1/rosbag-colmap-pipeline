@@ -102,6 +102,19 @@ colmap:
   # approximating the model away -- only takes effect with `--gpu`, a
   # CPU-only binary doesn't have the Caspar backend at all.
   ba_backend: caspar
+  # global_mapper's own internal 3-iteration BA loop (separate from the
+  # standalone bundle_adjuster pass above) -- Ceres-CPU-only until
+  # colmap/colmap#4484 added --GlobalMapper.ba_backend. Initially found
+  # to introduce a real scale-regime-split regression (floor2: 0->2,
+  # trolley_femto: 0->5) traced to Caspar silently ignoring
+  # constant_rig_from_world_rotation, so global_mapper's fixed-rotation
+  # stabilization stage silently became a second full joint-optimization
+  # pass. Fixed upstream (bjoernellens1/colmap commit 15906fd0, docs/
+  # cluster-dispatch.md's "GlobalMapper's internal BA loop" section) by
+  # forcing Ceres for just that sub-stage. Re-verified 0 regimes on both
+  # previously-regressed scenes post-fix -- default-enabled 2026-08-05.
+  # Only takes effect with `--gpu`; a CPU-only binary lacks this flag.
+  global_mapper_ba_backend: caspar
 
 scaling:
   method: umeyama
