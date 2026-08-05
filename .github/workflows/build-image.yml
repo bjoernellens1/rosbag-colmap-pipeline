@@ -51,32 +51,53 @@ jobs:
       # image (~31GB locally); GitHub-hosted runners' default ~14GB free
       # disk isn't enough headroom for a from-scratch build without this.
       #
-      # NOT using `build-mount-path: /var/lib/docker` (tried first, reverted
-      # 2026-08-05) -- relocating Docker's actual data-root onto the action's
-      # LVM-backed mount and then restarting the daemon against it hit three
-      # separate, recurring bootstrap failures in buildx's very first
-      # BuildKit image pull ("open /var/lib/docker/tmp/GetImageBlob...: no
-      # such file or directory", then "failed to register layer: symlink
-      # .../diff /var/lib/docker/overlay2/l/...: no such file or directory"),
-      # even after explicitly creating the tmp dir AND wiping the relocated
-      # root clean before the daemon ever touched it. That's consistent with
-      # a genuine overlay-on-overlay incompatibility on these runners (their
-      # own root filesystem is already overlayfs) rather than any leftover
-      # state we could patch around. Removing dotnet/android/haskell/codeql
-      # alone reclaims ~20-30GB directly on the runner's existing root
-      # filesystem (~14GB free by default) -- comfortably enough headroom
-      # for the ~31GB image without ever touching Docker's data-root or
-      # restarting the daemon at all.
+      # Tried (and reverted) dropping `build-mount-path: /var/lib/docker`
+      # entirely on 2026-08-05, reasoning removing dotnet/android/haskell/
+      # codeql alone would free enough root-fs space -- wrong: with
+      # root-reserve-mb: 1024, the LVM volume group swallows nearly ALL free
+      # root-fs space (reserving only the 1024MB), so /var/lib/docker
+      # (unrelocated) is left with almost nothing and the runner's own
+      # diagnostic logging hit "No space left on device" within the first
+      # minute. Docker's data-root genuinely has to live on the enlarged
+      # volume.
+      #
+      # The real fix for the earlier buildx-bootstrap failures ("open
+      # /var/lib/docker/tmp/GetImageBlob...: no such file or directory",
+      # then "failed to register layer: symlink .../diff
+      # /var/lib/docker/overlay2/l/...: no such file or directory") is the
+      # community-documented pattern for this action + Docker builds
+      # (easimon/maximize-build-space#41): back up /var/lib/docker BEFORE
+      # the action mounts a fresh volume over it (a mount, not a merge --
+      # anything already there becomes invisible once mounted over,
+      # confirmed via this action's own README), then rsync it back
+      # afterward so Docker's already-initialized directory structure,
+      # permissions, and any cached layers survive onto the new volume
+      # instead of the daemon bootstrapping cold against it.
+      - name: Back up Docker state before relocating data-root
+        run: |
+          sudo systemctl stop docker docker.socket
+          sudo rsync -aPq /var/lib/docker/ "$RUNNER_TEMP/docker-backup/"
+
       - name: Maximize build disk space
         uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 1024
           temp-reserve-mb: 100
           swap-size-mb: 1024
+          build-mount-path: /var/lib/docker
+          build-mount-path-ownership: root:root
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
+
+      - name: Restore Docker state onto the new data-root and restart
+        run: |
+          sudo rsync -aPq "$RUNNER_TEMP/docker-backup/" /var/lib/docker/
+          sudo rm -rf "$RUNNER_TEMP/docker-backup"
+          sudo systemctl start docker
+          sudo systemctl start docker.socket
+          sudo docker info | head -20
 
       - name: Checkout repository
         uses: actions/checkout@v4
