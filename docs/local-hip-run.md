@@ -18,7 +18,8 @@ extraction/matching (`SiftGPU`), dense stereo (`patch_match_stereo`), and bundle
 
 The COLMAP source is vendored as a plain directory copy at `docker/colmap-rocm-hip-src/` (not a
 git submodule, not cloned at build time) — this pins the exact tested worktree state rather than
-tracking a moving branch tip. To update it:
+tracking a moving branch tip. Re-sync it if the upstream branch moves and you want the newer
+state:
 
 ```bash
 rsync -a --exclude='.git' --exclude=build <colmap-rocm worktree>/ docker/colmap-rocm-hip-src/
@@ -56,14 +57,21 @@ GPU-passthrough flags for this host's AMD GPU:
 
 ```bash
 docker run --rm \
-  --privileged \
-  --device=/dev/kfd --device=/dev/dri \
   -e HSA_OVERRIDE_GFX_VERSION=11.5.1 \
+  --group-add 39 --group-add 105 \
+  --security-opt label=disable \
+  --device=/dev/kfd --device=/dev/dri \
   -e QT_QPA_PLATFORM=offscreen \
   -v "$(pwd)/docker/workspaces:/app/workspaces" \
   --entrypoint gttool colmap-rgbd-gt \
   run-colmap /app/workspaces/<scene> --gpu --config /app/configs/tum_like.yaml
 ```
+
+`--group-add 39`/`--group-add 105` are this host's numeric `video`/`render` GIDs — podman
+accepts numeric GIDs without needing the group *names* to exist inside the container's
+`/etc/group` (only `video` is defined there by default). `--gpu` on `run-colmap` sets
+`colmap.use_gpu = true` in the config actually passed to `colmap_pipeline()` — this is a
+pipeline-level flag, not CUDA-specific naming; it works identically for the HIP build.
 
 ## Verification (pipeline-level, not just standalone COLMAP)
 
@@ -82,7 +90,16 @@ The run:
   `cameras.bin`/`frames.bin`/`images.bin`, matching this pipeline's expected output layout
   (`configs/ablator.toml`'s `result_glob = "{model_path}/colmap/sparse/0/points3D.bin"` pattern,
   same artifact this repo's cluster-dispatch path checks for).
-- Log output showed genuine GPU-side work in feature extraction and matching throughout.
+- Log output showed genuine GPU-side work throughout feature extraction, matching, global
+  positioning, and iterative retriangulation/refinement — not a silent CPU fallback. (Bundle
+  adjustment itself is a separate story: see the Caspar-HIP bug section below — `global_mapper`'s
+  own internal BA loop stays on CPU/Ceres by default regardless of backend, an unrelated,
+  documented fragmentation-regression gate, not a HIP limitation.)
+
+This result is consistent with an earlier round of verification on the same scene (two
+independent runs registering the same 613/613 frames with highly correlated per-step motion,
+correlation 0.96) done before this build was folded in as the default, confirming the merge into
+`docker/Dockerfile` didn't change reconstruction behavior.
 
 **Conclusion: the actual production pipeline (`gttool run-colmap` → `colmap_pipeline()`), not
 just COLMAP itself, works correctly end-to-end on this host's local AMD GPU via HIP, as the
@@ -136,8 +153,12 @@ kernel files — removing the undefined-behavior read entirely.
   — confirms the fix doesn't affect the already-working models.
 
 This repo's `docker/colmap-rocm-hip-src/` vendored copy was updated 2026-08-05 from the pre-fix
-`0b079c55` to the fixed `d6824820` (the docs commit immediately after the fix landed) — the
-currently-built image includes this fix.
+`0b079c55` to the fixed `d6824820` (the docs commit immediately after the fix landed), and
+re-verified directly against this pipeline's own data (not just the upstream repro): running
+`bundle_adjuster --BundleAdjustment.backend CASPAR` on a real 361-frame OPENCV-model
+reconstruction (`kitchen1`) through the rebuilt image now produces finite scores and a genuine
+(non-bit-identical) camera-parameter refinement — mean reprojection error `0.803997px ->
+0.803996px`, no NaN, no premature 3-iteration bailout.
 
 **Scope note**: the same uninitialized-accumulator pattern exists in every other generated score
 kernel across every camera model — currently unpatched (numerically silent so far, but not proven
