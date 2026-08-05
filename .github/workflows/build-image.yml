@@ -65,16 +65,23 @@ jobs:
 
       - name: Restart docker with the new data root
         run: |
+          # easimon/maximize-build-space relocates Docker's data-root onto the
+          # new mount but leaves behind stale graph-driver/image-store state
+          # from the runner's pre-provisioned Docker (pre-pulled images for
+          # its own tooling) -- docker was never started against this fresh
+          # mount before, so any leftover overlay2/image metadata refers to
+          # layer paths that don't exist on it. Confirmed live: buildx's first
+          # pull failed with "open /var/lib/docker/tmp/GetImageBlob...: no
+          # such file or directory", and after just creating that one dir,
+          # failed again one step later with "failed to register layer:
+          # symlink .../diff /var/lib/docker/overlay2/l/...: no such file or
+          # directory" -- both symptoms of the same stale-state root cause.
+          # Wipe the relocated data-root completely before the daemon ever
+          # touches it, so it starts genuinely empty on the new mount instead
+          # of inheriting inconsistent state.
+          sudo rm -rf /var/lib/docker/*
           sudo systemctl start docker
           sudo systemctl start docker.socket
-          # easimon/maximize-build-space relocates Docker's data-root onto the
-          # new mount, but doesn't create data-root/tmp/ before the daemon
-          # comes back up -- buildx's first BuildKit image pull needs that dir
-          # to stage blobs and fails immediately ("open
-          # /var/lib/docker/tmp/GetImageBlob...: no such file or directory")
-          # if it's missing. Create it explicitly before buildx ever touches
-          # the daemon.
-          sudo mkdir -p /var/lib/docker/tmp
           sudo docker info | head -20
 
       - name: Checkout repository
