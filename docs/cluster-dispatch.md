@@ -166,9 +166,48 @@ in ~43 minutes (vs a CPU baseline where the BA pass alone took ~83 minutes).
 `colmap/scale_regime_correction.py` still auto-corrects any split that does occur on some future
 scene (independent per-regime metric anchoring) — always run `scale-depth` and check its log for
 "internally-inconsistent scale regimes" after any cluster dispatch, same as every other scene
-validated this session. `configs/ablator.toml` points at the verified `cuda-caspar-opencv-v2`
-image, and `configs/navigation.yaml`'s `ba_backend: caspar` is enabled by default (only takes
-effect when `--gpu` is also passed, so local CPU runs are unaffected).
+validated this session. `configs/navigation.yaml`'s `ba_backend: caspar` is enabled by default
+(only takes effect when `--gpu` is also passed, so local CPU runs are unaffected) and controls
+this standalone `bundle_adjuster` pass only.
+
+### GlobalMapper's internal BA loop — real speedup, NOT enabled by default (accuracy regression)
+
+`global_mapper`'s own internal 3-iteration bundle-adjustment loop (separate from the standalone
+`bundle_adjuster` pass above) was Ceres-CPU-only in COLMAP 4.1.1 — confirmed the dominant
+wall-clock cost on large scenes (700-900s on 1600-2700 frame scenes), well past global positioning
+and the final BA pass combined. `docker/Dockerfile.cuda` now builds from
+[bjoernellens1/colmap's `caspar-opencv-support` branch](https://github.com/bjoernellens1/colmap/tree/caspar-opencv-support)
+(pinned commit, not upstream's `4.1.1` tag) instead of the earlier overlay-patch approach — this
+branch rebases our own OpenCV Caspar work (§ above, submitted upstream as
+[colmap/colmap#4611](https://github.com/colmap/colmap/pull/4611)) on top of current `main`, which
+includes [colmap/colmap#4484](https://github.com/colmap/colmap/pull/4484) "Support selecting
+Caspar BA backend in global mapper" (merged after 4.1.1) — exposing `--GlobalMapper.ba_backend
+CASPAR`.
+
+**This flag is genuinely fast** (verified on `trolley_femto`: internal BA loop 11.1s vs 883.6s CPU,
+~80x; `global_mapper` total 590s vs 2387s, ~4x; full pipeline 17.9min vs 45.5min, ~2.5x) but a live
+accuracy sweep across three scenes found it introduces **real scale-regime-split regressions**:
+
+| scene | frames | scale regimes (GlobalMapper Caspar) | baseline (standalone-BA-only Caspar) |
+|---|---|---|---|
+| tableware1 | 155 | 0 (clean) | 0 |
+| floor2 | 267 | **2** | 0 |
+| trolley_femto | 1599 | **5** | 0 |
+
+Two of three scenes regressed from zero split to a real split — including `floor2`, which was
+independently verified zero-split-clean with the (more mature, extensively validated) standalone
+Caspar path. This is a real correctness gap in the newer, less-battle-tested upstream
+`GlobalMapper.ba_backend` feature, not noise.
+
+**Consequence**: `colmap/runner.py`'s `global_mapper()` gates this flag on a separate
+`global_mapper_ba_backend` config key (checked independently of `ba_backend`, which stays on for
+the safe standalone-BA path) — **not set in `configs/navigation.yaml`**, so it stays off by
+default. Global positioning and retriangulation remain CPU-only regardless (confirmed via source:
+`global_positioning.cc` hardcodes `SPARSE_SCHUR` with no Caspar option; `incremental_triangulator.cc`
+has no threading/GPU hooks at all — nothing to flip there without further upstream work). Revisit
+`global_mapper_ba_backend: caspar` once upstream's global-mapper Caspar integration matures, or
+investigate the regression further (e.g. whether it's related to the fixed-rotation-stage handling
+or convergence criteria differing from Ceres) before ever defaulting it on.
 
 ## Dispatching a job
 

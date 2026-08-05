@@ -78,7 +78,22 @@ mps = true                           # required: cluster GPUs run Exclusive_Proc
 # -- always run scale-depth and check its output for
 # "internally-inconsistent scale regimes" after any cluster dispatch,
 # same as every other scene validated this session.
-image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-caspar-opencv-v2"
+#
+# UPDATED 2026-08-05: this image is now built from
+# bjoernellens1/colmap's caspar-opencv-support branch (not upstream's
+# 4.1.1 tag) -- adds colmap/colmap#4484 (merged after 4.1.1),
+# --GlobalMapper.ba_backend CASPAR for global_mapper's internal BA loop
+# (previously Ceres-CPU-only, the dominant wall-clock cost on large
+# scenes: 700-900s). Genuinely fast when enabled (11s vs 884s CPU on
+# trolley_femto) -- but colmap/runner.py's global_mapper() gates it on
+# a SEPARATE `global_mapper_ba_backend` config key, NOT set in
+# configs/navigation.yaml, because a live accuracy sweep found it
+# introduces real scale-regime-split regressions on 2/3 tested scenes
+# (floor2: 0->2 segments, trolley_femto: 0->5 segments; only
+# tableware1 stayed clean) -- this newer upstream feature is less
+# mature than the standalone bundle_adjuster Caspar path (which stays
+# on by default, extensively validated, zero regressions all session).
+image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-caspar-globalba-v1"
 max_concurrent = 8                   # real GPU count on this cluster; doesn't control actual scheduling,
                                       # just how many in-flight k8s Jobs the dispatcher tracks at once
 # FIXED 2026-08-04: NOT using pvc_scratch here (despite that being the
