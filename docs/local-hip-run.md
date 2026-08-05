@@ -92,8 +92,22 @@ Both runs:
   matching this pipeline's expected output layout (`configs/ablator.toml`'s
   `result_glob = "{model_path}/colmap/sparse/0/points3D.bin"` pattern, same artifact this repo's
   cluster-dispatch path checks for).
-- Log output showed genuine GPU-side work throughout (Caspar bundle-adjustment iterations,
-  global positioning, iterative retriangulation/refinement stages), not a silent CPU fallback.
+- Log output showed genuine GPU-side work in feature extraction and matching.
+
+  **Correction (2026-08-05):** the line above originally also claimed this run's `global_mapper`
+  stage showed "Caspar bundle-adjustment iterations" — that was wrong. `global_mapper`'s internal
+  3-iteration BA loop (`global_positioning.cc`/`bundle_adjustment_ceres.cc`) always ran the
+  CPU Ceres solver in this run, printing `Requested to use GPU for bundle adjustment, but COLMAP
+  was compiled without CUDA support. Falling back to CPU-based solvers.` on every invocation —
+  this is *expected and correct*: `global_mapper`'s Caspar path (`--GlobalMapper.ba_backend
+  CASPAR`) is deliberately not requested by this pipeline (see `runner.py`'s `global_mapper()`,
+  which gates it behind a separate `global_mapper_ba_backend` key left unset by default after a
+  live accuracy sweep found it caused reconstruction fragmentation — see that function's comment).
+  So neither this run nor its sibling ever exercised genuine GPU/Caspar bundle adjustment; only
+  GPU SIFT extraction and matching were real GPU work here. See "Corrected GPU-BA speedup
+  measurement (2026-08-05)" below for the actual first genuine Caspar-HIP BA measurement, using
+  the separate, already-safe-by-default standalone `bundle_adjuster --BundleAdjustment.backend
+  CASPAR` pass instead.
 
 **Run-to-run consistency check**: both runs registered the identical frame count (613/613) and
 produced near-identical trajectory path length (45.65 vs 45.23 units) with highly correlated
@@ -108,6 +122,62 @@ indicates a correct, reproducible reconstruction, and that matched closely acros
 
 **Conclusion: the actual production pipeline (`gttool run-colmap` → `colmap_pipeline()`), not
 just COLMAP itself, works correctly end-to-end on this host's local AMD GPU via HIP.**
+
+## Corrected GPU-BA speedup measurement (2026-08-05)
+
+The verification run above never exercised genuine GPU bundle adjustment (see correction note).
+`global_mapper`'s own internal Caspar BA path stays deliberately disabled (documented
+fragmentation regression, see `runner.py`'s `global_mapper()`). The separate, already
+safe-by-default path is the standalone final BA pass (`runner.py`'s `bundle_adjuster()`,
+gated on `colmap.ba_backend: caspar` + `use_gpu: true`) — this is the mechanism actually
+exercised below, the first genuine Caspar-HIP BA measurement for this pipeline.
+
+Two fresh workspaces from the same 613-frame `freiburg1_desk` extraction, run through
+`gttool run-colmap` end to end with `run_bundle_adjustment: true` added to the config so the
+final `bundle_adjuster` pass runs in both:
+
+- CPU run: `--config` with `use_gpu: false`, no `ba_backend` (final BA uses Ceres/CPU).
+- GPU run: `gttool run-colmap --gpu --config ...` with `ba_backend: caspar`
+  (`--privileged`, `--device=/dev/kfd`, `--device=/dev/dri`,
+  `-e HSA_OVERRIDE_GFX_VERSION=11.5.1`, `--security-opt label=disable`).
+
+Confirmed genuine Caspar-HIP engagement on the GPU run by re-running the same standalone
+`bundle_adjuster --BundleAdjustment.backend CASPAR` step at `--log_level 2`:
+
+```
+bundle_adjustment_caspar.cc:24] Using Caspar bundle adjuster
+cuda.cc:72] Found 1 CUDA device(s), selected device 0 with name Radeon 8060S Graphics
+bundle_adjustment_caspar.cc:819]   Points: 54205  Frames: 613
+bundle_adjustment_caspar.cc:998] Caspar: CONVERGED_DIAG_EXIT after 3 iters
+```
+
+(HIP is exposed through COLMAP's CUDA-compat layer, hence the "CUDA device" log wording — the
+actual device is an AMD APU via ROCm/HIP, not real CUDA.)
+
+Per-stage wall-clock timings, taken from COLMAP's own `timer.cc` elapsed-time log lines:
+
+| Stage | CPU run | GPU run | Delta |
+|---|---|---|---|
+| Feature extraction | 13.8s | 68.8s | GPU run 5x **slower** here — HIP context/kernel init overhead dominates on this small scene; not a regression in the GPU path itself, just fixed startup cost not amortized at 613 frames |
+| Sequential matching | 38.8s | 31.8s | GPU ~18% faster |
+| `global_mapper` internal loop (CPU Ceres both runs, by design) | 275.5s | 273.9s | ~identical, as expected — same code path both runs |
+| Final bundle adjustment (Ceres CPU vs Caspar-HIP GPU) | 65.6s | 0.48s | **~137x faster** on GPU — this is the genuine, first-ever Caspar-HIP BA speedup measurement for this pipeline |
+| **End-to-end pipeline** | 401.3s | 383.0s | ~5% faster end-to-end |
+
+**Honest takeaways:**
+
+- The BA-stage-only speedup (~137x) is real and dramatic, but it is measuring one ~66-second
+  pass out of a ~400-second pipeline dominated by `global_mapper`'s internal (CPU-only, by
+  design) loop — so end-to-end improvement from this fix alone is modest (~5%) until/unless
+  `global_mapper`'s own Caspar path matures enough to re-enable (tracked separately, see
+  `runner.py`).
+- The Caspar solver's own log flagged `CONVERGED_DIAG_EXIT after 3 iters (diag limit hit ->
+  likely premature termination)` and printed `score_current: -nan` during iteration — the GPU
+  BA pass converges suspiciously fast and may not be doing a numerically complete optimization
+  on this scene. This is a correctness question orthogonal to the speed measurement above and
+  is flagged here, not resolved.
+- freiburg3 (1300-frame) re-measurement was not completed in this pass — scope was limited to
+  freiburg1_desk to first confirm genuine engagement and get a trustworthy number.
 
 ## Files
 
