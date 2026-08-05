@@ -67,6 +67,14 @@ jobs:
         run: |
           sudo systemctl start docker
           sudo systemctl start docker.socket
+          # easimon/maximize-build-space relocates Docker's data-root onto the
+          # new mount, but doesn't create data-root/tmp/ before the daemon
+          # comes back up -- buildx's first BuildKit image pull needs that dir
+          # to stage blobs and fails immediately ("open
+          # /var/lib/docker/tmp/GetImageBlob...: no such file or directory")
+          # if it's missing. Create it explicitly before buildx ever touches
+          # the daemon.
+          sudo mkdir -p /var/lib/docker/tmp
           sudo docker info | head -20
 
       - name: Checkout repository
