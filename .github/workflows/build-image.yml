@@ -50,45 +50,33 @@ jobs:
       # FetchContent-vendored PoseLib/faiss/onnxruntime deps produce a large
       # image (~31GB locally); GitHub-hosted runners' default ~14GB free
       # disk isn't enough headroom for a from-scratch build without this.
+      #
+      # NOT using `build-mount-path: /var/lib/docker` (tried first, reverted
+      # 2026-08-05) -- relocating Docker's actual data-root onto the action's
+      # LVM-backed mount and then restarting the daemon against it hit three
+      # separate, recurring bootstrap failures in buildx's very first
+      # BuildKit image pull ("open /var/lib/docker/tmp/GetImageBlob...: no
+      # such file or directory", then "failed to register layer: symlink
+      # .../diff /var/lib/docker/overlay2/l/...: no such file or directory"),
+      # even after explicitly creating the tmp dir AND wiping the relocated
+      # root clean before the daemon ever touched it. That's consistent with
+      # a genuine overlay-on-overlay incompatibility on these runners (their
+      # own root filesystem is already overlayfs) rather than any leftover
+      # state we could patch around. Removing dotnet/android/haskell/codeql
+      # alone reclaims ~20-30GB directly on the runner's existing root
+      # filesystem (~14GB free by default) -- comfortably enough headroom
+      # for the ~31GB image without ever touching Docker's data-root or
+      # restarting the daemon at all.
       - name: Maximize build disk space
         uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 1024
           temp-reserve-mb: 100
           swap-size-mb: 1024
-          build-mount-path: /var/lib/docker
-          build-mount-path-ownership: root:root
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
-
-      - name: Restart docker with the new data root
-        run: |
-          # easimon/maximize-build-space relocates Docker's data-root onto the
-          # new mount but leaves behind stale graph-driver/image-store state
-          # from the runner's pre-provisioned Docker (pre-pulled images for
-          # its own tooling) -- docker was never started against this fresh
-          # mount before, so any leftover overlay2/image metadata refers to
-          # layer paths that don't exist on it. Confirmed live: buildx's first
-          # pull failed with "open /var/lib/docker/tmp/GetImageBlob...: no
-          # such file or directory", and after just creating that one dir,
-          # failed again one step later with "failed to register layer:
-          # symlink .../diff /var/lib/docker/overlay2/l/...: no such file or
-          # directory" -- both symptoms of the same stale-state root cause.
-          # Wipe the relocated data-root completely before the daemon ever
-          # touches it, so it starts genuinely empty on the new mount instead
-          # of inheriting inconsistent state.
-          sudo rm -rf /var/lib/docker/*
-          sudo systemctl start docker
-          sudo systemctl start docker.socket
-          # Docker itself creates data-root/tmp/ lazily on first use, but
-          # buildx's first BuildKit image pull races that and fails with
-          # "open /var/lib/docker/tmp/GetImageBlob...: no such file or
-          # directory" if the daemon hasn't created it yet. Create it
-          # explicitly right after the daemon is up, before buildx touches it.
-          sudo mkdir -p /var/lib/docker/tmp
-          sudo docker info | head -20
 
       - name: Checkout repository
         uses: actions/checkout@v4
