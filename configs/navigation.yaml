@@ -79,6 +79,28 @@ colmap:
   # Requires the vocab tree baked into the Docker image (docker/Dockerfile).
   loop_detection: true
   vocab_tree_path: /opt/colmap_vocab_tree/vocab_tree_flickr100K_words32K.bin
+  # Root-caused 2026-08-05 on kitchen1 (repetitive, low-texture cabinets/
+  # tile/countertops): vocab-tree loop-closure retrieval above found
+  # visually-similar-but-wrong pairs and COLMAP verified them with the
+  # SAME thresholds as genuine sequential-neighbor pairs (it has no
+  # concept of "stricter verification for loop pairs") -- 328/3948 (8.3%)
+  # relative-pose edges came out invalid, fragmenting the reconstruction
+  # into 43 segments. Disabling loop_detection entirely fixed kitchen1 but
+  # isn't generalizable -- hallway only reconnects into one model WITH
+  # loop_detection on (see docs/mapper-selection.md), so a global
+  # "turn it off" trades one fragmentation failure mode for another.
+  # colmap/loop_closure_filter.py runs after sequential_matcher (only when
+  # loop_detection actually applied): pairs whose SEQUENCE-RANK gap isn't
+  # explained by `sequential_overlap`/`quadratic_overlap` above could only
+  # have come from vocab-tree retrieval, never the sequential window --
+  # only THOSE pairs are held to these stricter thresholds and dropped if
+  # they fall short; genuine sequential/quadratic-window pairs are never
+  # touched. See
+  # outputs/loop_closure_filter.json (written per-run) for what got
+  # pruned. Validated on kitchen1 (fragmentation resolved), floor3
+  # (stayed a single connected model), see docs/loop-closure-filtering.md.
+  loop_closure_min_inliers: 30
+  loop_closure_min_inlier_ratio: 0.35
   # The incremental mapper only runs periodic global BA during
   # registration -- loop-closure matches found late in the sequence (via
   # vocab-tree loop detection above) may not get fully propagated by the

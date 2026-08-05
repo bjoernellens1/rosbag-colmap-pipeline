@@ -1,5 +1,6 @@
 """COLMAP CLI runner."""
 
+import json
 import shutil
 import struct
 import subprocess
@@ -8,6 +9,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from colmap_rgbd_gt.logging import get_logger
+from colmap_rgbd_gt.colmap.loop_closure_filter import (
+    DEFAULT_MIN_INLIERS,
+    DEFAULT_MIN_INLIER_RATIO,
+    filter_loop_closure_matches,
+)
 from colmap_rgbd_gt.colmap.reconstruction import ensure_text_model
 from colmap_rgbd_gt.utils.io import ensure_dir
 
@@ -236,8 +242,56 @@ class COLMAPRunner:
             logger.info("Sequential matching completed")
         else:
             logger.error(f"Sequential matching failed: {result.stderr}")
+            return False
 
-        return result.success
+        loop_detection_applied = loop_detection and bool(vocab_tree_path)
+        if loop_detection_applied:
+            self._filter_loop_closure_matches(config, overlap, quadratic_overlap)
+
+        return True
+
+    def _filter_loop_closure_matches(
+        self, config: dict[str, Any], sequential_overlap: int, quadratic_overlap: bool
+    ) -> None:
+        # Only meaningful when loop_detection actually ran -- sequential-
+        # only matching has no loop-closure-retrieved pairs to prune. See
+        # colmap/loop_closure_filter.py's module docstring for the full
+        # root-cause writeup (kitchen1, 2026-08-05).
+        min_inliers = config.get("loop_closure_min_inliers", DEFAULT_MIN_INLIERS)
+        min_inlier_ratio = config.get("loop_closure_min_inlier_ratio", DEFAULT_MIN_INLIER_RATIO)
+
+        try:
+            result = filter_loop_closure_matches(
+                self.database,
+                sequential_overlap=sequential_overlap,
+                quadratic_overlap=quadratic_overlap,
+                min_inliers=min_inliers,
+                min_inlier_ratio=min_inlier_ratio,
+            )
+            report_path = self.workspace / "outputs" / "loop_closure_filter.json"
+            ensure_dir(report_path.parent)
+            with open(report_path, "w") as f:
+                json.dump(
+                    {
+                        "action_taken": result.action_taken,
+                        "reason": result.reason,
+                        "n_pairs_checked": result.n_pairs_checked,
+                        "n_loop_pairs": result.n_loop_pairs,
+                        "n_sequential_pairs": result.n_sequential_pairs,
+                        "n_dropped": result.n_dropped,
+                        "dropped_pairs": result.dropped_pairs,
+                        "min_inliers": min_inliers,
+                        "min_inlier_ratio": min_inlier_ratio,
+                    },
+                    f,
+                    indent=2,
+                )
+            logger.info(
+                f"loop_closure_filter: {result.n_loop_pairs} loop pair(s) checked, "
+                f"{result.n_dropped} dropped -- see {report_path}"
+            )
+        except Exception as e:
+            logger.warning(f"loop_closure_filter failed, continuing without it: {e}")
 
     def exhaustive_matcher(self, config: dict[str, Any]) -> bool:
         use_gpu = config.get("use_gpu", False)

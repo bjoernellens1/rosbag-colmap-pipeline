@@ -79,6 +79,55 @@ class COLMAPDatabase:
         matches = np.frombuffer(data, dtype=np.uint32).reshape(rows, cols)
         return matches
 
+    # COLMAP's own pair-id encoding (see COLMAP's database.py reference
+    # script / src/colmap/scene/database.cc `ImagePairToPairId`):
+    # pair_id = image_id1 * kMaxNumImages + image_id2, image_id1 < image_id2.
+    _MAX_NUM_IMAGES = 2147483647
+
+    @classmethod
+    def pair_id_to_image_ids(cls, pair_id: int) -> tuple[int, int]:
+        image_id2 = pair_id % cls._MAX_NUM_IMAGES
+        image_id1 = (pair_id - image_id2) // cls._MAX_NUM_IMAGES
+        return image_id1, image_id2
+
+    def get_match_counts(self) -> dict[int, int]:
+        """pair_id -> number of putative (pre-verification) matches, from
+        the `matches` table (raw output of feature matching, before
+        `two_view_geometries` geometric verification)."""
+        if not self._conn:
+            raise RuntimeError("Database not connected")
+
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT pair_id, rows FROM matches")
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def get_verified_pairs(self) -> list[dict[str, Any]]:
+        """pair_id + inlier count for every geometrically-verified pair in
+        `two_view_geometries` (COLMAP only keeps a row here once a pair
+        passes verification, so `rows` is the inlier count for that pair)."""
+        if not self._conn:
+            raise RuntimeError("Database not connected")
+
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT pair_id, rows FROM two_view_geometries")
+        return [{"pair_id": row[0], "num_inliers": row[1]} for row in cursor.fetchall()]
+
+    def delete_pairs(self, pair_ids: list[int]) -> None:
+        """Remove pairs from both `matches` and `two_view_geometries` --
+        used to prune false-positive loop-closure matches before mapping
+        (see colmap/loop_closure_filter.py). Sequential-neighbor pairs are
+        never passed here."""
+        if not self._conn:
+            raise RuntimeError("Database not connected")
+        if not pair_ids:
+            return
+
+        cursor = self._conn.cursor()
+        placeholders = ",".join("?" * len(pair_ids))
+        cursor.execute(f"DELETE FROM matches WHERE pair_id IN ({placeholders})", pair_ids)
+        cursor.execute(f"DELETE FROM two_view_geometries WHERE pair_id IN ({placeholders})", pair_ids)
+        self._conn.commit()
+
     def get_camera(self, camera_id: int) -> dict[str, Any]:
         if not self._conn:
             raise RuntimeError("Database not connected")
