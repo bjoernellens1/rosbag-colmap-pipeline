@@ -161,23 +161,88 @@ Per-stage wall-clock timings, taken from COLMAP's own `timer.cc` elapsed-time lo
 | Feature extraction | 13.8s | 68.8s | GPU run 5x **slower** here — HIP context/kernel init overhead dominates on this small scene; not a regression in the GPU path itself, just fixed startup cost not amortized at 613 frames |
 | Sequential matching | 38.8s | 31.8s | GPU ~18% faster |
 | `global_mapper` internal loop (CPU Ceres both runs, by design) | 275.5s | 273.9s | ~identical, as expected — same code path both runs |
-| Final bundle adjustment (Ceres CPU vs Caspar-HIP GPU) | 65.6s | 0.48s | **~137x faster** on GPU — this is the genuine, first-ever Caspar-HIP BA speedup measurement for this pipeline |
+| Final bundle adjustment (Ceres CPU vs Caspar-HIP GPU) | 65.6s | 0.48s | **NOT a trustworthy speedup** — see "Correctness follow-up" below: the Caspar-HIP pass does zero optimization work on this scene (nan cost from iteration 0, no LM step ever accepted, output bit-identical to input), so 0.48s reflects an immediate solver failure, not fast-but-correct GPU work |
 | **End-to-end pipeline** | 401.3s | 383.0s | ~5% faster end-to-end |
 
 **Honest takeaways:**
 
-- The BA-stage-only speedup (~137x) is real and dramatic, but it is measuring one ~66-second
-  pass out of a ~400-second pipeline dominated by `global_mapper`'s internal (CPU-only, by
-  design) loop — so end-to-end improvement from this fix alone is modest (~5%) until/unless
-  `global_mapper`'s own Caspar path matures enough to re-enable (tracked separately, see
-  `runner.py`).
-- The Caspar solver's own log flagged `CONVERGED_DIAG_EXIT after 3 iters (diag limit hit ->
-  likely premature termination)` and printed `score_current: -nan` during iteration — the GPU
-  BA pass converges suspiciously fast and may not be doing a numerically complete optimization
-  on this scene. This is a correctness question orthogonal to the speed measurement above and
-  is flagged here, not resolved.
 - freiburg3 (1300-frame) re-measurement was not completed in this pass — scope was limited to
   freiburg1_desk to first confirm genuine engagement and get a trustworthy number.
+
+**Correctness follow-up (2026-08-05): the ~137x number above is NOT trustworthy — confirmed
+real bug, not the earlier-documented benign symforce-rocm nan artifact.**
+
+The Caspar solver's own log flagged `CONVERGED_DIAG_EXIT after 3 iters (diag limit hit ->
+likely premature termination)` with `score_current: -nan` during iteration. `symforce-rocm`'s
+`docs/rocm-integration.md` documents a *different*, confirmed-benign nan artifact on synthetic
+BA problems: a near-convergence 0/0 caught by the LM step-acceptance guard, occurring late,
+after most of the real optimization work is already done. This occurrence does not match that
+signature — `score_current` is `-nan` from iteration 0, not just near the end, and no LM step
+is ever accepted (see next paragraph) — so the earlier finding does not transfer here without
+separate verification, and separate verification says it doesn't apply.
+
+To isolate the BA-only effect (a full pipeline run confounds CPU-vs-GPU SIFT/matcher output
+with the BA backend, since each run's `global_mapper` stage then optimizes a different
+reconstruction), the same post-`global_mapper` sparse model (613/613 registered images, 53992
+points, baseline mean reprojection error **0.767858px** via `colmap model_analyzer`) was fed
+through both backends directly:
+
+- `colmap bundle_adjuster --input_path in --output_path out_ceres --log_level 2` (Ceres/CPU):
+  101 iterations, 77.1s, `NO_CONVERGENCE` (hit the 100-iteration cap) — reprojection error
+  **0.785265px** (slightly worse than baseline; still mid-optimization, not fully converged
+  within the cap, but genuinely doing iterative work).
+- `colmap bundle_adjuster --input_path in --output_path out_caspar --BundleAdjustment.backend
+  CASPAR --log_level 2` (Caspar-HIP): full iteration trace —
+  ```
+  score_init:  4.491941e+05
+  solver_iter:   0  pcg_iter:  10  score_current: -nan  score_best: 4.491941e+05  step_quality: 0.000  diag: 1.000e+00
+  solver_iter:   1  pcg_iter:   6  score_current: -nan  score_best: 4.491941e+05  step_quality: 0.000  diag: 2.000e+00
+  solver_iter:   2  pcg_iter:   2  score_current: -nan  score_best: 4.491941e+05  step_quality: 0.000  diag: 8.000e+00
+  Caspar: CONVERGED_DIAG_EXIT after 3 iters (diag limit hit -> likely premature termination)
+  ```
+  `step_quality: 0.000` on every iteration (no step ever accepted), `score_best` pinned at
+  `score_init` throughout, `diag` (LM damping) climbing 1.0 -> 2.0 -> 8.0 as every step is
+  rejected until the damping ceiling is hit and the solver bails — its own log message says so.
+  The camera-intrinsics log line shows `params: [...] -> [...]` with identical values before
+  and after. `model_analyzer` on `out_caspar` confirms it: mean reprojection error
+  **0.767858px — bit-identical to the pre-BA baseline.** Caspar wrote back the unmodified
+  input; it did no optimization work at all.
+
+**Verdict: real bug, not benign.** The ~137x/0.48s number reflects a solver that fails
+immediately (nan cost from iteration 0, zero accepted steps) and exits, not a fast-but-correct
+GPU optimization. It should not be used as a genuine performance measurement until fixed.
+
+**Update (2026-08-05): root cause narrowed — isolated to Caspar's `OPENCV` camera-model
+kernels specifically, not to this scene's scale, input data, or distortion values.** Dedicated
+follow-up investigation (in `colmap-rocm`, see that repo's `docs/rocm-integration.md` for the
+full evidence trail) reproduced this exact failure directly against `bundle_adjuster
+--BundleAdjustment.backend CASPAR`, then ruled out causes by controlled substitution on the
+identical 613-pose/54458-point problem:
+
+- Input data is clean — no NaN/Inf in `points3D.txt`, all 635192 observations have positive
+  camera-frame depth, no degenerate/behind-camera points.
+- **Scale is not the trigger**: the same 613-image/54458-point problem with the camera model
+  swapped to `SIMPLE_RADIAL` or `PINHOLE` (same poses/observations, no re-extraction) bundle-
+  adjusts correctly — 200 real LM iterations, genuine score decrease, only occasional benign
+  transient nans correctly rejected (the already-diagnosed symforce-rocm artifact, not this bug).
+- **Distortion coefficient values are not the trigger**: forcing the camera to stay `OPENCV`
+  but zeroing `k1,k2,p1,p2` (mathematically equivalent to `PINHOLE`) still fails identically.
+- **Factor-variant dispatch is not the sole trigger**: both Caspar's `FIXED_PP` and `BASE`
+  OPENCV factor variants (different generated kernel files) fail the same way.
+
+This means the defect is specific to Caspar's `OPENCV`-model kernel family
+(`kernel_opencv_*.cu` in `colmap-rocm`'s `src/thirdparty/Symforce-Caspar/generated/f32/`) at
+this problem's scale — it did not show up in this session's earlier smaller-scale OPENCV
+numerical check (30 images) but does at 613 images/634857 factors, while non-OPENCV models are
+fine at the same 613-image scale. Leading hypothesis: OPENCV's 8 intrinsic parameters (vs. 4 for
+PINHOLE/SIMPLE_RADIAL) give its kernels a larger per-thread-block register/shared-memory
+footprint, and a buffer/stride sizing assumption correct for the smaller models breaks past some
+factor-count threshold — the same general class of HIP shared-memory bug already found and fixed
+once this session in symforce-rocm, but a distinct instance, not the same code. Exact defect
+location (line number inside the ~1400-line generated kernel files) not yet pinned down — see
+`colmap-rocm`'s `docs/rocm-integration.md` 2026-08-05 entry for the full reproduction commands,
+ruled-out list, and suggested next step (bisect problem size with OPENCV forced to find the
+exact failure threshold). Not yet fixed.
 
 ## Files
 
