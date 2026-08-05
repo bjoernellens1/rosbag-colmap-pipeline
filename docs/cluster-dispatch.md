@@ -170,7 +170,7 @@ validated this session. `configs/navigation.yaml`'s `ba_backend: caspar` is enab
 (only takes effect when `--gpu` is also passed, so local CPU runs are unaffected) and controls
 this standalone `bundle_adjuster` pass only.
 
-### GlobalMapper's internal BA loop — real speedup, NOT enabled by default (accuracy regression)
+### GlobalMapper's internal BA loop — real speedup, regression found and fixed
 
 `global_mapper`'s own internal 3-iteration bundle-adjustment loop (separate from the standalone
 `bundle_adjuster` pass above) was Ceres-CPU-only in COLMAP 4.1.1 — confirmed the dominant
@@ -199,15 +199,36 @@ independently verified zero-split-clean with the (more mature, extensively valid
 Caspar path. This is a real correctness gap in the newer, less-battle-tested upstream
 `GlobalMapper.ba_backend` feature, not noise.
 
-**Consequence**: `colmap/runner.py`'s `global_mapper()` gates this flag on a separate
+**Root cause and fix**: `global_mapper`'s internal loop runs each iteration in two stages —
+a "fixed-rotation stage" (`constant_rig_from_world_rotation=true`, meant to stabilize positions
+before touching rotation) followed by a full joint-optimization stage. Caspar's pose node is a
+single retracted `Pose3` (rotation+translation together) with no mechanism to hold rotation
+constant while translation is free — `constant_rig_from_world_rotation` is silently ignored when
+`backend == CASPAR` (confirmed via source: zero references to it anywhere in
+`bundle_adjustment_caspar.cc`), so the fixed-rotation stage silently degraded into a second full
+joint-optimization pass instead of a stabilizing partial one. Fixed in `global_mapper.cc`'s
+`IterativeBundleAdjustment` (commit `15906fd0` on `caspar-opencv-support`) by forcing Ceres for
+just that one sub-stage when the configured backend is Caspar — the joint-optimization stage
+(the actual dominant cost) still uses Caspar, preserving the speed win.
+
+Re-verified clean on both regressed scenes after the fix:
+
+| scene | frames | scale regimes (post-fix) | pre-fix |
+|---|---|---|---|
+| floor2 | 267 | 0 | 2 |
+| trolley_femto | 1599 | 0 | 5 |
+
+`trolley_femto`'s internal BA loop also dropped from 884s (CPU) to 298.6s (Caspar, post-fix) —
+close to the earlier pre-fix speedup measurement, confirming the fix didn't sacrifice the
+performance win.
+
+**Consequence**: `colmap/runner.py`'s `global_mapper()` still gates this flag on a separate
 `global_mapper_ba_backend` config key (checked independently of `ba_backend`, which stays on for
-the safe standalone-BA path) — **not set in `configs/navigation.yaml`**, so it stays off by
-default. Global positioning and retriangulation remain CPU-only regardless (confirmed via source:
-`global_positioning.cc` hardcodes `SPARSE_SCHUR` with no Caspar option; `incremental_triangulator.cc`
-has no threading/GPU hooks at all — nothing to flip there without further upstream work). Revisit
-`global_mapper_ba_backend: caspar` once upstream's global-mapper Caspar integration matures, or
-investigate the regression further (e.g. whether it's related to the fixed-rotation-stage handling
-or convergence criteria differing from Ceres) before ever defaulting it on.
+the safe standalone-BA path) — **not yet set in `configs/navigation.yaml`**, pending a decision on
+defaulting it on now that the regression is fixed and re-verified. Global positioning and
+retriangulation remain CPU-only regardless (confirmed via source: `global_positioning.cc`
+hardcodes `SPARSE_SCHUR` with no Caspar option; `incremental_triangulator.cc` has no
+threading/GPU hooks at all — nothing to flip there without further upstream work).
 
 ## Dispatching a job
 

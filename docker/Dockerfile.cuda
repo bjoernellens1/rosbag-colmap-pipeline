@@ -85,8 +85,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv pip install --upgrade pip setuptools wheel
 
 # Built from bjoernellens1/colmap's caspar-opencv-support branch (pinned to
-# commit c212e1c8), NOT upstream colmap/colmap's 4.1.1 tag -- that branch is
-# main (post-4.1.1) rebased with two things 4.1.1 lacks:
+# commit 15906fd0), NOT upstream colmap/colmap's 4.1.1 tag -- that branch is
+# main (post-4.1.1) rebased with three things 4.1.1 lacks:
 #   1. Our own native-OPENCV-support-for-Caspar patch, submitted upstream as
 #      colmap/colmap#4611 (see docker/patches/caspar-opencv/README.md for the
 #      full derivation -- that directory is now historical/reference only,
@@ -100,6 +100,24 @@ RUN uv pip install --upgrade pip setuptools wheel
 #      via source (global_positioning.cc hardcodes SPARSE_SCHUR with no
 #      Caspar option; incremental_triangulator.cc has no threading/GPU hooks
 #      at all) -- nothing to flip there without further upstream changes.
+#   3. Our own fix for a real accuracy regression found in (2): Caspar's
+#      pose node can't hold rotation constant while translation is free
+#      (BundleAdjustmentOptions::constant_rig_from_world_rotation is
+#      silently ignored -- zero references to it in
+#      bundle_adjustment_caspar.cc), so global_mapper's internal loop's
+#      "fixed-rotation stage" -- which relies on exactly that constraint to
+#      stabilize the trajectory before joint optimization -- silently
+#      degraded into a second full joint-optimization pass under Caspar.
+#      A live 3-scene accuracy sweep confirmed this caused real
+#      scale-regime-split regressions (floor2: 0->2 regimes, trolley_femto:
+#      0->5; only the smallest/simplest scene stayed clean). Fixed by
+#      forcing Ceres for just the fixed-rotation sub-stage when the
+#      configured backend is Caspar (see global_mapper.cc's
+#      IterativeBundleAdjustment) -- keeps Caspar's actual speed win (the
+#      joint-optimization stage, which dominates wall-clock) while
+#      restoring the stabilizing effect. Re-verify with the same 3-scene
+#      sweep before ever flipping global_mapper_ba_backend: caspar on by
+#      default in configs/navigation.yaml.
 # CMAKE_CUDA_ARCHITECTURES pinned to 80 (A100) explicitly -- autodetection
 # needs a GPU present at build time, which this build host does not have.
 # -DCASPAR_ENABLED=ON: COLMAP's native GPU bundle-adjustment solver, select
@@ -108,7 +126,7 @@ RUN uv pip install --upgrade pip setuptools wheel
 # packages needed beyond the CUDA toolkit already in this image.
 ARG COLMAP_BUILD_JOBS=
 RUN git clone https://github.com/bjoernellens1/colmap.git /opt/colmap_src \
-    && cd /opt/colmap_src && git checkout c212e1c8 && cd / \
+    && cd /opt/colmap_src && git checkout 15906fd0 && cd / \
     && mkdir -p /opt/colmap_src/build \
     && cd /opt/colmap_src/build \
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \
