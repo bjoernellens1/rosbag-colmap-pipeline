@@ -250,20 +250,6 @@ def estimate_global_scale(
         raise ValueError("No valid camera info in manifest and no fallback profile configured")
     logger.info(f"Scale estimation camera intrinsics source: {intrinsics_source}")
 
-    # ADDED 2026-08-04: if colmap_pipeline() rectified RGB to a true
-    # PINHOLE frame (Caspar GPU BA -- see pipelines/colmap_only.py's
-    # RECTIFIED_MARKER_NAME), COLMAP's 2D features now live in an
-    # undistorted frame. correspondences.py's project_colmap_points_to_image
-    # re-distorts 3D->2D reprojections to match COLMAP's observation frame
-    # -- with a rectified workspace that must be zero distortion, or every
-    # correspondence gets projected into the wrong (still-distorted) pixel
-    # location and scale estimation breaks.
-    from colmap_rgbd_gt.pipelines.colmap_only import RECTIFIED_MARKER_NAME
-    distortion_coeffs = intrinsics_data.get("D", [])
-    if (ws.layout.colmap / RECTIFIED_MARKER_NAME).exists():
-        logger.info("Workspace was rectified for Caspar GPU BA -- using zero distortion for scale estimation")
-        distortion_coeffs = []
-
     intrinsics = CameraIntrinsics(
         fx=intrinsics_data["K"][0],
         fy=intrinsics_data["K"][4],
@@ -272,7 +258,7 @@ def estimate_global_scale(
         width=intrinsics_data["width"],
         height=intrinsics_data["height"],
         distortion_model=intrinsics_data.get("distortion_model", "plumb_bob"),
-        distortion_coeffs=distortion_coeffs,
+        distortion_coeffs=intrinsics_data.get("D", []),
     )
 
     sparse_dir = ws.layout.colmap / "sparse" / "0"

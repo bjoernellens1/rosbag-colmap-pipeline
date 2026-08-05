@@ -387,6 +387,27 @@ class COLMAPRunner:
         if config.get("skip_retriangulation", False):
             args.extend(["--GlobalMapper.skip_retriangulation", "1"])
 
+        # ADDED 2026-08-04/05: global_mapper's own internal 3-iteration BA
+        # loop was Ceres-CPU-only in COLMAP 4.1.1 (no backend flag existed
+        # at all) -- confirmed the dominant wall-clock cost on large scenes
+        # (700-900s on 1600-2700 frame scenes) alongside global positioning
+        # and retriangulation. docker/Dockerfile.cuda now builds from
+        # colmap/colmap#4484 (merged after 4.1.1), which adds
+        # --GlobalMapper.ba_backend, and it IS genuinely fast (11s vs 884s
+        # CPU on trolley_femto's internal loop). BUT: deliberately gated on
+        # a SEPARATE key from `ba_backend` (the standalone bundle_adjuster
+        # Caspar flag, safe and on by default) -- live accuracy sweep found
+        # this newer, less-mature upstream feature introduces real
+        # scale-regime-split regressions on 2/3 tested scenes (floor2: 0->2
+        # segments, trolley_femto: 0->5 segments; only tableware1, the
+        # smallest/simplest scene, stayed clean). NOT enabled in
+        # configs/navigation.yaml -- opt-in only, until upstream's
+        # global-mapper Caspar integration matures. Only takes effect when
+        # GPU is actually requested -- a CPU-only binary doesn't have this
+        # flag.
+        if config.get("global_mapper_ba_backend") == "caspar" and config.get("use_gpu", False):
+            args.extend(["--GlobalMapper.ba_backend", "CASPAR"])
+
         logger.info("Running COLMAP global_mapper (GLOMAP-derived global SfM)...")
         result = self._run_command(args)
 

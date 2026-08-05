@@ -84,21 +84,49 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 RUN uv pip install --upgrade pip setuptools wheel
 
-# Same COLMAP 4.1.1 source build as docker/Dockerfile, with CUDA enabled
-# and the A100's compute capability (8.0) pinned explicitly --
-# CMAKE_CUDA_ARCHITECTURES autodetection needs a GPU present at build
-# time, which this build host does not have (splatograph hit exactly this
-# failure class building its own Dockerfile.cuda for the same cluster).
-#
-# -DCASPAR_ENABLED=ON: COLMAP's own native GPU bundle-adjustment solver
-# (shipped since 4.1.0, bundled thirdparty CUDA kernel source, not a
-# Ceres backend) -- select it at runtime with
-# --BundleAdjustment.backend CASPAR (standalone bundle_adjuster) or
-# --Mapper.ba_local_backend/--Mapper.ba_global_backend CASPAR
-# (incremental mapper). Needs no extra apt packages beyond the CUDA
-# toolkit already present in this image.
+# Built from bjoernellens1/colmap's caspar-opencv-support branch (pinned to
+# commit 15906fd0), NOT upstream colmap/colmap's 4.1.1 tag -- that branch is
+# main (post-4.1.1) rebased with three things 4.1.1 lacks:
+#   1. Our own native-OPENCV-support-for-Caspar patch, submitted upstream as
+#      colmap/colmap#4611 (see docker/patches/caspar-opencv/README.md for the
+#      full derivation -- that directory is now historical/reference only,
+#      no longer applied as an overlay here since it's baked into this pin).
+#   2. colmap/colmap#4484 "Support selecting Caspar BA backend in global
+#      mapper" (merged after 4.1.1), which exposes
+#      --GlobalMapper.ba_backend CASPAR -- global_mapper's own internal
+#      3-iteration bundle-adjustment loop (previously Ceres-CPU-only, no
+#      backend flag existed in 4.1.1) can now also run on Caspar/GPU.
+#      Global positioning and retriangulation remain CPU-only -- confirmed
+#      via source (global_positioning.cc hardcodes SPARSE_SCHUR with no
+#      Caspar option; incremental_triangulator.cc has no threading/GPU hooks
+#      at all) -- nothing to flip there without further upstream changes.
+#   3. Our own fix for a real accuracy regression found in (2): Caspar's
+#      pose node can't hold rotation constant while translation is free
+#      (BundleAdjustmentOptions::constant_rig_from_world_rotation is
+#      silently ignored -- zero references to it in
+#      bundle_adjustment_caspar.cc), so global_mapper's internal loop's
+#      "fixed-rotation stage" -- which relies on exactly that constraint to
+#      stabilize the trajectory before joint optimization -- silently
+#      degraded into a second full joint-optimization pass under Caspar.
+#      A live 3-scene accuracy sweep confirmed this caused real
+#      scale-regime-split regressions (floor2: 0->2 regimes, trolley_femto:
+#      0->5; only the smallest/simplest scene stayed clean). Fixed by
+#      forcing Ceres for just the fixed-rotation sub-stage when the
+#      configured backend is Caspar (see global_mapper.cc's
+#      IterativeBundleAdjustment) -- keeps Caspar's actual speed win (the
+#      joint-optimization stage, which dominates wall-clock) while
+#      restoring the stabilizing effect. Re-verify with the same 3-scene
+#      sweep before ever flipping global_mapper_ba_backend: caspar on by
+#      default in configs/navigation.yaml.
+# CMAKE_CUDA_ARCHITECTURES pinned to 80 (A100) explicitly -- autodetection
+# needs a GPU present at build time, which this build host does not have.
+# -DCASPAR_ENABLED=ON: COLMAP's native GPU bundle-adjustment solver, select
+# per-stage via --BundleAdjustment.backend (standalone bundle_adjuster) and
+# --GlobalMapper.ba_backend (global_mapper's internal loop). No extra apt
+# packages needed beyond the CUDA toolkit already in this image.
 ARG COLMAP_BUILD_JOBS=
-RUN git clone --depth 1 --branch 4.1.1 https://github.com/colmap/colmap.git /opt/colmap_src \
+RUN git clone https://github.com/bjoernellens1/colmap.git /opt/colmap_src \
+    && cd /opt/colmap_src && git checkout 15906fd0 && cd / \
     && mkdir -p /opt/colmap_src/build \
     && cd /opt/colmap_src/build \
     && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DCUDA_ENABLED=ON \

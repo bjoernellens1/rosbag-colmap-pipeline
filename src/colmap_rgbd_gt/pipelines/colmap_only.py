@@ -1,7 +1,5 @@
 """COLMAP reconstruction pipeline."""
 
-import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,16 +10,9 @@ from colmap_rgbd_gt.export.tum import export_trajectory_tum
 from colmap_rgbd_gt.dataset.schema import Workspace
 from colmap_rgbd_gt.dataset.manifest import Manifest
 from colmap_rgbd_gt.ingest.camera_info import resolve_camera_info
-from colmap_rgbd_gt.rectify.undistort import rectify_workspace_images
 from colmap_rgbd_gt.utils.camera import CameraIntrinsics
 
 logger = get_logger(__name__)
-
-# Marker file scale_estimation.py checks for to know a workspace's COLMAP
-# features live in an undistorted (PINHOLE) frame rather than the raw
-# OPENCV-distorted one, so it can zero out distortion consistently -- see
-# colmap_pipeline()'s Caspar branch below.
-RECTIFIED_MARKER_NAME = "rectified.json"
 
 
 def _resolve_camera_params(
@@ -61,37 +52,22 @@ def colmap_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         return False
 
     colmap_config = dict(config.get("colmap", {}))
-    camera_params, resolved_model, intrinsics = _resolve_camera_params(workspace, colmap_config)
+    camera_params, resolved_model, _intrinsics = _resolve_camera_params(workspace, colmap_config)
     if camera_params:
         colmap_config.setdefault("camera_params", camera_params)
         colmap_config.setdefault("camera_model", resolved_model)
 
-    image_dir_name = "rgb"
-    rectified_marker = ws.layout.colmap / RECTIFIED_MARKER_NAME
-    # ADDED 2026-08-04: Caspar (COLMAP's native GPU BA solver) only
-    # supports PINHOLE/SIMPLE_RADIAL camera models, not this pipeline's
-    # OPENCV (real RGBD lens tangential distortion). Rather than
-    # approximating the camera model away (tested and rejected -- see
-    # docs/cluster-dispatch.md's Caspar section, SIMPLE_RADIAL reproduced
-    # a real scale-regime-split regression), undistort every RGB frame to
-    # a mathematically exact PINHOLE image first, so no accuracy is lost.
-    if colmap_config.get("ba_backend") == "caspar" and colmap_config.get("use_gpu") and intrinsics:
-        rectify_workspace_images(ws, intrinsics)
-        image_dir_name = "rgb_rectified"
-        pinhole_intrinsics = replace(intrinsics, distortion_coeffs=[])
-        colmap_config["camera_model"] = "PINHOLE"
-        colmap_config["camera_params"] = pinhole_intrinsics.to_colmap_str("PINHOLE")
-        rectified_marker.parent.mkdir(parents=True, exist_ok=True)
-        rectified_marker.write_text(json.dumps({"rectified": True}))
-    elif rectified_marker.exists():
-        # Stale marker from a prior Caspar run against this same workspace
-        # -- clear it so a later CPU/OPENCV re-run isn't misread as
-        # rectified by scale_estimation.py.
-        rectified_marker.unlink()
-
-    runner = COLMAPRunner(
-        workspace, colmap_config.get("colmap_path", "colmap"), image_dir_name=image_dir_name
-    )
+    # `ba_backend: caspar` (see colmap/runner.py's bundle_adjuster()) needs no
+    # special-casing here: docker/patches/caspar-opencv/ (applied in
+    # docker/Dockerfile.cuda's COLMAP build) adds native OPENCV support to
+    # Caspar's GPU BA kernels, so it takes this pipeline's normal OPENCV
+    # camera model directly -- see that patch's README.md. An earlier
+    # approach undistorted RGB to PINHOLE first (rectify/undistort.py's
+    # rectify_workspace_images(), still available as a utility) since Caspar
+    # upstream only ships PINHOLE/SIMPLE_RADIAL, but that added a real
+    # accuracy risk (tested and found a residual scale-regime split on
+    # harder scenes) that native OPENCV support avoids entirely.
+    runner = COLMAPRunner(workspace, colmap_config.get("colmap_path", "colmap"))
 
     logger.info("Running COLMAP reconstruction...")
     success = runner.run_full_pipeline(colmap_config)

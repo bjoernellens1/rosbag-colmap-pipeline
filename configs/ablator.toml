@@ -59,25 +59,50 @@ mps = true                           # required: cluster GPUs run Exclusive_Proc
 # exactly that version range. See docs/cluster-dispatch.md.
 #
 # Caspar (COLMAP's native GPU BA solver, no Ceres/cuDSS dependency) IS
-# used here, via docker/Dockerfile.cuda's -DCASPAR_ENABLED=ON build --
-# Caspar only supports PINHOLE/SIMPLE_RADIAL, not this pipeline's OPENCV,
-# so pipelines/colmap_only.py undistorts RGB to a true PINHOLE image
-# first (rectify/undistort.py's rectify_workspace_images(), see
-# configs/navigation.yaml's ba_backend: caspar comment). Verified live
-# 2026-08-04: tableware1 (155 frames, tabletop scan) reconstructs cleanly
-# with ZERO scale-regime split, 0.24s Caspar BA. floor2 (267 frames,
-# navigation corridor) still shows a SMALLER residual split (~1.9x, down
-# from SIMPLE_RADIAL's ~3.6x) even with mathematically-correct
-# undistortion -- ruled out as an undistortion-quality artifact (two
-# different interpolation/border-handling implementations produced
-# nearly identical splits), so it's a scene-specific sensitivity of
-# navigation.yaml's matcher tuning to the exact pixel content, not a
-# distortion-math bug. scale_regime_correction already auto-corrects any
-# split that does occur (see colmap/scale_regime_correction.py) -- always
-# run scale-depth and check its output for "internally-inconsistent
-# scale regimes" after any cluster dispatch, same as every other scene
-# validated this session. See docs/cluster-dispatch.md's Caspar section.
-image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-caspar-v3"
+# used here, via docker/Dockerfile.cuda's -DCASPAR_ENABLED=ON build.
+# Caspar upstream only supports PINHOLE/SIMPLE_RADIAL, not this
+# pipeline's OPENCV -- an intermediate approach undistorted RGB to
+# PINHOLE first (rectify_workspace_images()) but left a residual
+# scale-regime split on harder scenes (scene-specific matcher-tuning
+# sensitivity to the undistorted pixel content, not a distortion-math
+# bug). FIXED PROPERLY 2026-08-04: docker/patches/caspar-opencv/ adds
+# NATIVE OpenCV camera-model support directly to Caspar's CUDA kernels
+# (symforce-generated, see that directory's README.md for the full
+# derivation) -- no image preprocessing needed at all now. Verified
+# live: floor2 (267 frames, navigation corridor -- the scene that
+# showed the residual split under rectification) now reconstructs with
+# 267/267 poses and ZERO scale-regime split, matching the CPU/OPENCV
+# baseline exactly, with a 0.42s Caspar BA pass (vs the CPU baseline's
+# ~2min). scale_regime_correction still auto-corrects any split that
+# does occur on some future scene (see colmap/scale_regime_correction.py)
+# -- always run scale-depth and check its output for
+# "internally-inconsistent scale regimes" after any cluster dispatch,
+# same as every other scene validated this session.
+#
+# UPDATED 2026-08-05: this image is now built from
+# bjoernellens1/colmap's caspar-opencv-support branch (not upstream's
+# 4.1.1 tag) -- adds colmap/colmap#4484 (merged after 4.1.1),
+# --GlobalMapper.ba_backend CASPAR for global_mapper's internal BA loop
+# (previously Ceres-CPU-only, the dominant wall-clock cost on large
+# scenes: 700-900s). Genuinely fast when enabled (299s vs 884s CPU on
+# trolley_femto's iterative BA loop alone). A live accuracy sweep
+# initially found this introduced real scale-regime-split regressions
+# on 2/3 tested scenes (floor2: 0->2 segments, trolley_femto: 0->5
+# segments) -- root-caused to Caspar silently ignoring
+# constant_rig_from_world_rotation, so global_mapper's fixed-rotation
+# stabilization stage silently degraded into a second full joint
+# optimization under Caspar. FIXED (commit 15906fd0 on
+# caspar-opencv-support): force Ceres for just that one sub-stage when
+# the configured backend is Caspar, keeping Caspar for the
+# joint-optimization stage (the actual dominant cost). Re-verified
+# clean on both regression scenes after the fix: floor2 0 regimes (was
+# 2), trolley_femto 0 regimes (was 5). colmap/runner.py's
+# global_mapper() still gates this behind a SEPARATE
+# `global_mapper_ba_backend` config key (not `ba_backend`, which
+# controls the standalone bundle_adjuster path) -- currently opt-in,
+# not yet set in configs/navigation.yaml pending a decision on
+# defaulting it on now that the regression is fixed.
+image = "ghcr.io/bjoernellens1/colmap-rgbd-gt:cuda-caspar-globalba-v2"
 max_concurrent = 8                   # real GPU count on this cluster; doesn't control actual scheduling,
                                       # just how many in-flight k8s Jobs the dispatcher tracks at once
 # FIXED 2026-08-04: NOT using pvc_scratch here (despite that being the
