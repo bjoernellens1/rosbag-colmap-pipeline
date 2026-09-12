@@ -11,6 +11,7 @@ from colmap_rgbd_gt.ingest.bag_reader import BagReader
 from colmap_rgbd_gt.ingest.image_decode import decode_image
 from colmap_rgbd_gt.ingest.depth_decode import decode_depth_image, filter_depth_range, depth_to_uint16
 from colmap_rgbd_gt.ingest.camera_info import extract_camera_info
+from colmap_rgbd_gt.ingest.depth_registration import register_depth_to_color
 from colmap_rgbd_gt.ingest.keyframe_selection import KeyframeSelector
 from colmap_rgbd_gt.utils.io import ensure_dir, save_json
 from colmap_rgbd_gt.utils.time import ros_time_to_nanoseconds
@@ -116,11 +117,30 @@ def _process_depth_frame(
     scale: float,
     min_m: float,
     max_m: float,
+    registration: dict[str, Any] | None = None,
 ) -> tuple[int, int, str] | None:
-    """Decode/filter/encode/write one depth frame. Independent per frame --
-    safe to run off the main thread."""
+    """Decode/[register]/filter/encode/write one depth frame. Independent
+    per frame -- safe to run off the main thread.
+
+    `registration`, when not None, carries a resolved depth->color
+    registration to apply BEFORE range-filtering/encoding (registration
+    operates on raw metric depth): keys `depth_K`, `color_K`,
+    `color_width`, `color_height`, `T_color_from_depth` (see
+    `depth_registration.register_depth_to_color`).
+    """
     try:
         depth_m = decode_depth_image(msg, scale=scale)
+
+        if registration is not None:
+            depth_m = register_depth_to_color(
+                depth_m,
+                registration["depth_K"],
+                registration["color_K"],
+                registration["color_width"],
+                registration["color_height"],
+                registration["T_color_from_depth"],
+            )
+
         depth_m = filter_depth_range(depth_m, min_m=min_m, max_m=max_m)
         depth_uint16 = depth_to_uint16(depth_m, scale=1000.0)
 
@@ -134,12 +154,65 @@ def _process_depth_frame(
         return None
 
 
+def resolve_depth_registration(
+    depth_config: dict[str, Any],
+    depth_camera_info: dict[str, Any] | None,
+    color_camera_info: dict[str, Any] | None,
+    static_transforms: dict[tuple[str, str], Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve everything `_process_depth_frame` needs to register depth
+    frames into the color pixel grid, once, before the per-frame loop.
+
+    Returns `(registration, reason)`. `registration` is `None` (a provable
+    no-op -- callers must leave existing behavior byte-identical) whenever
+    registration is disabled, or required inputs (depth camera_info, color
+    camera_info, a resolvable /tf_static chain) aren't available; `reason`
+    explains why, for logging/manifest provenance.
+    """
+    from colmap_rgbd_gt.ingest.depth_registration import resolve_registration_transform
+
+    reg_config = (depth_config or {}).get("registration", {}) or {}
+    if not reg_config.get("enabled", False):
+        return None, "disabled"
+
+    T_color_from_depth, reason = resolve_registration_transform(
+        depth_config, color_camera_info, static_transforms or {}
+    )
+    if T_color_from_depth is None:
+        return None, reason
+
+    if not depth_camera_info:
+        return None, "no depth camera_info available"
+
+    depth_K = np.array(depth_camera_info["K"], dtype=np.float64).reshape(3, 3)
+    color_K = np.array(color_camera_info["K"], dtype=np.float64).reshape(3, 3)
+
+    return (
+        {
+            "depth_K": depth_K,
+            "color_K": color_K,
+            "color_width": color_camera_info["width"],
+            "color_height": color_camera_info["height"],
+            "T_color_from_depth": T_color_from_depth,
+        },
+        "ok",
+    )
+
+
 def export_depth_frames(
     reader: BagReader,
     output_dir: Path,
     topic: str,
-    config: dict[str, Any]
+    config: dict[str, Any],
+    registration: dict[str, Any] | None = None,
 ) -> list[tuple[int, str]]:
+    """Export depth frames. `registration`, when provided (see
+    `resolve_depth_registration`), is a resolved depth->color registration
+    applied to every frame before range-filtering/encoding; `None` (the
+    default) is a fully backward-compatible no-op -- existing callers that
+    don't pass it get byte-identical behavior to before registration
+    support was added.
+    """
     output_dir = ensure_dir(output_dir)
     max_frames = config.get("max_frames")
     stride = config.get("min_frame_stride", 1)
@@ -162,7 +235,7 @@ def export_depth_frames(
 
             futures.append(executor.submit(
                 _process_depth_frame, frame_idx, timestamp, msg,
-                output_dir, scale, min_m, max_m,
+                output_dir, scale, min_m, max_m, registration,
             ))
             frame_idx += 1
 
@@ -178,6 +251,17 @@ def export_depth_frames(
 
     logger.info(f"Exported {len(timestamps_paths)} depth frames to {output_dir}")
     return timestamps_paths
+
+
+def read_camera_info(reader: BagReader, topic: str) -> dict[str, Any] | None:
+    """Read the first camera_info message on `topic` without writing
+    anything to disk -- used when metadata (K/width/height) is needed
+    in-memory (e.g. to resolve depth registration) but doesn't itself
+    belong in the workspace's own camera_info.json (that's `topic`'s
+    dedicated, written export -- see `export_camera_info`)."""
+    for _timestamp, msg in reader.get_messages(topic):
+        return extract_camera_info(msg)
+    return None
 
 
 def export_camera_info(

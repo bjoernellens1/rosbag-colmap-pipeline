@@ -1,0 +1,92 @@
+bag:
+  path: ""
+  storage_id: auto
+
+# Orbbec Femto profile for kitchen1 SPECIFICALLY, with depth-to-color pixel
+# registration enabled. Extends configs/orbbec.yaml (this project's configs
+# have no YAML-inheritance mechanism, so this is a full standalone copy,
+# not a diff) with `depth.registration.enabled: true` -- do not apply this
+# profile to other orbbec scenes without independently re-verifying they
+# need it; see configs/orbbec.yaml's own comment on why registration stays
+# off there by default.
+#
+# Verified finding motivating this file (kitchen1_0.mcap, Orbbec Femto):
+#   - `/camera/depth/camera_info` reports width=1280, height=720, K
+#     IDENTICAL to `/camera/color/camera_info`'s K, and
+#     frame_id="camera_color_optical_frame" -- i.e. it claims to already be
+#     in the color optical frame. Almost certainly a driver/SDK metadata
+#     quirk for the "raw" depth stream, not a real registration.
+#   - `/tf_static` carries the REAL physical extrinsic,
+#     camera_depth_frame -> camera_color_frame: translation
+#     (x=-0.002163790702819824, y=-0.03213808059692383,
+#     z=-0.001285609245300293) m, quaternion
+#     (x=0.0009387580794282258, y=-0.05192433297634125,
+#     z=0.0015042441664263606, w=0.9979771375656128) -- a real ~3.2cm
+#     stereo baseline, not zero.
+#   - An independent edge-based depth/color alignment QC tool
+#     (depth_registration_check_v2.json, 25 sampled frames) found an
+#     inconsistent best-alignment pixel shift per frame ranging from
+#     (0,-2) to (6,-6) -- never a single constant shift, and the naive
+#     zero-shift assumption was only within 2px of the true peak on 48% of
+#     frames -- exactly the depth-dependent-parallax signature of an
+#     uncompensated stereo baseline, not sensor noise.
+# See ingest/depth_registration.py and ingest/tf_static.py for the
+# implementation this enables.
+topics:
+  rgb: /camera/color/image_raw/compressed
+  rgb_compressed: /camera/color/image_raw/compressed
+  depth: /camera/depth/image_raw/compressed
+  pointcloud: null
+  camera_info: /camera/color/camera_info
+  depth_camera_info: /camera/depth/camera_info
+
+sync:
+  max_rgb_depth_dt_sec: 0.03
+  max_rgb_info_dt_sec: 0.1
+
+images:
+  export_format: png
+  min_frame_stride: 1
+  max_frames: null
+
+depth:
+  unit_scale_to_meters: 0.001
+  min_depth_m: 0.2
+  max_depth_m: 8.0
+  sample_stride: 8
+  registration:
+    enabled: true
+    # camera_depth_optical_frame / camera_color_optical_frame are the
+    # physically-real TF frame ids (per the driver's static TF tree) --
+    # NOT what /camera/depth/camera_info's own (mislabeled) frame_id
+    # claims. See ingest/depth_registration.py's module docstring.
+    depth_frame_id: camera_depth_optical_frame
+    color_frame_id: camera_color_optical_frame
+
+colmap:
+  camera_model: OPENCV
+  single_camera: true
+  matcher: sequential
+  use_gpu: false
+  mapper_preset: medium
+  mapper_type: global
+
+scaling:
+  method: umeyama
+  max_frames_for_scale: 100
+  min_points_per_frame: 200
+  outlier_rejection: ransac
+  robust_statistic: median
+
+depth_ba:
+  enabled: true
+  depth_tolerance: 0.1
+  obs_sigma_base: 0.01
+  obs_sigma_quadratic: 0.0
+  max_iterations: 50
+  max_frames_for_ba: 100
+
+export:
+  tum: true
+  csv: true
+  json_report: true

@@ -60,7 +60,14 @@ def scale_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         f"(confidence: {scale_estimate.confidence:.2%}, method: {scale_estimate.method})"
     )
 
-    diagnostics = compute_diagnostics([scale_estimate])
+    # FIXED 2026-09-12 (Bug 2): `[scale_estimate]` wrapped the single pooled
+    # global estimate in a length-1 list, so `compute_diagnostics` always
+    # reported `num_valid_frames=1` -- a reporting artifact, not a real
+    # "only 1 frame used". `estimate_global_scale` now returns the genuine
+    # per-frame estimates it computed internally via `.frame_estimates`;
+    # use those, falling back to the old length-1 behavior only if none
+    # were produced (e.g. insufficient correspondences).
+    diagnostics = compute_diagnostics(scale_estimate.frame_estimates or [scale_estimate])
 
     try:
         plot_scale_histogram(
