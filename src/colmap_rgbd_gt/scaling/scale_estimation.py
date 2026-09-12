@@ -19,6 +19,14 @@ class ScaleEstimate:
     num_samples: int
     inlier_ratio: float
     per_frame_scales: list[float] | None = None
+    # Genuine per-frame ScaleEstimate objects (one per trajectory frame that
+    # yielded usable correspondences), populated by `estimate_global_scale`.
+    # This is what should be handed to `diagnostics.compute_diagnostics` --
+    # NOT `[scale_estimate]` (a length-1 list wrapping the pooled/global
+    # estimate), which used to make `num_valid_frames` report 1 regardless
+    # of how many frames actually contributed. See `estimate_global_scale`'s
+    # docstring for how these are computed/aggregated.
+    frame_estimates: list["ScaleEstimate"] | None = None
 
 
 def estimate_scale_median(
@@ -229,8 +237,9 @@ def estimate_global_scale(
         project_colmap_points_to_image,
         find_valid_correspondences,
     )
-    from colmap_rgbd_gt.scaling.backproject import transform_to_world
     from colmap_rgbd_gt.utils.camera import CameraIntrinsics
+    from colmap_rgbd_gt.utils.transforms import quaternion_to_rotation_matrix
+    from colmap_rgbd_gt.scaling.robust_statistics import remove_outliers_mad
     from colmap_rgbd_gt.ingest.camera_info import resolve_camera_info
 
     ws = Workspace(workspace)
@@ -272,10 +281,22 @@ def estimate_global_scale(
     max_frames = config.get("max_frames_for_scale", 100)
     min_points = config.get("min_points_per_frame", 200)
     sample_stride = config.get("sample_stride", 8)
+    robust_statistic = config.get("robust_statistic", "median")
 
     all_depth_points = []
     all_colmap_points = []
-    per_frame_scales = []
+
+    # FIXED 2026-09-12 (Bug 2, part 1): this used to be `trajectory[:max_frames]`
+    # -- only the FIRST `max_frames` frames of the whole sequence. On a long
+    # trajectory with known local scale drift (see the scale-regime-jump note
+    # below), that samples one small, non-representative slice of the
+    # sequence rather than genuinely covering it. Take an evenly-spaced
+    # sample across the WHOLE trajectory instead.
+    if max_frames and max_frames > 0 and len(trajectory) > max_frames:
+        stride_frames = max(1, len(trajectory) // max_frames)
+        frames_to_use = trajectory[::stride_frames][:max_frames]
+    else:
+        frames_to_use = trajectory
 
     # First pass: gather (depth image, projected uv/depth) per frame without
     # any depth-tolerance filtering. `find_valid_correspondences` compares
@@ -290,7 +311,7 @@ def estimate_global_scale(
     # depth-tolerance-gated matching below.
     frame_cache = []
     coarse_ratios = []
-    for entry in trajectory[:max_frames]:
+    for entry in frames_to_use:
         frame_id = entry["frame_id"]
         image_name = f"{frame_id:06d}.png"
 
@@ -346,7 +367,10 @@ def estimate_global_scale(
                 # see note above the loop this feeds into for why.
                 frame_coarse_scale = float(np.median(frame_ratios))
 
-        frame_cache.append((colmap_pts_all[valid_idx], uv, depths_proj, depth, entry, frame_coarse_scale))
+        frame_cache.append((
+            colmap_pts_all[valid_idx], uv, depths_proj, depth, entry,
+            frame_coarse_scale, qvec_w2c, tvec_w2c,
+        ))
 
     coarse_scale = float(np.median(coarse_ratios)) if coarse_ratios else 1.0
     logger.info(f"Coarse pre-scale estimate for correspondence matching: {coarse_scale:.4f}")
@@ -369,7 +393,22 @@ def estimate_global_scale(
     # correct signal of real internal scale drift -- investigate the
     # reconstruction (e.g. via `colmap model_analyzer` / per-segment
     # scale checks) rather than trusting the single scale blindly.
-    for colmap_pts_valid, uv, depths_proj, depth, entry, frame_coarse_scale in frame_cache:
+    # FIXED 2026-09-12 (Bug 1): the old code transformed `depth_pts_cam`
+    # (metric, CAMERA frame) into WORLD frame via `t_c2w` -- the camera
+    # center in COLMAP's arbitrary, unscaled units -- producing
+    # `scale_true * X_colmap + (1 - scale_true) * C_colmap_unscaled`, a
+    # geometry-dependent blend of the true scale and 1.0 that made the
+    # recovered scale depend on how the camera-center/point covariance
+    # happens to look in a given reconstruction (see module-level bug
+    # writeup / task description for the full derivation). The fix: do the
+    # comparison in the CAMERA frame instead, where no such mixing exists.
+    # `colmap_pts_matched` is in COLMAP WORLD frame (arbitrary units);
+    # transform it into the SAME camera frame `depth_pts_cam` is already in
+    # via the frame's own w2c pose. Both point sets then differ by a pure
+    # scalar scale from the camera origin (same ray direction, same
+    # correspondence) -- no unit mixing, no world-frame contamination.
+    frame_estimates: list[ScaleEstimate] = []
+    for colmap_pts_valid, uv, depths_proj, depth, entry, frame_coarse_scale, qvec_w2c, tvec_w2c in frame_cache:
         local_scale = frame_coarse_scale if frame_coarse_scale is not None else coarse_scale
         depth_pts_cam, colmap_pts_matched = find_valid_correspondences(
             depth,
@@ -391,11 +430,23 @@ def estimate_global_scale(
         if np.sum(valid) < 3:
             continue
 
-        R_c2w, t_c2w = entry["R"], entry["t"]
-        depth_pts_world = transform_to_world(depth_pts_cam[valid], (R_c2w, t_c2w))
+        R_w2c = quaternion_to_rotation_matrix(qvec_w2c)
+        colmap_pts_cam = (R_w2c @ colmap_pts_matched[valid].T).T + tvec_w2c
+        depth_pts_cam_valid = depth_pts_cam[valid]
 
-        all_depth_points.extend(depth_pts_world.tolist())
-        all_colmap_points.extend(colmap_pts_matched[valid].tolist())
+        all_depth_points.extend(depth_pts_cam_valid.tolist())
+        all_colmap_points.extend(colmap_pts_cam.tolist())
+
+        # Bug 2: genuine PER-FRAME scale estimate (not just pooled totals),
+        # for real per-frame diagnostics/robustness -- see
+        # `scaling.diagnostics.compute_diagnostics`, which expects a list of
+        # objects exposing `.scale`/`.num_samples`/`.confidence` and used to
+        # be handed a length-1 list wrapping the single pooled estimate
+        # (`num_valid_frames` was therefore always 1, a reporting artifact
+        # rather than a real "only 1 frame used"). Reuse the same simple
+        # ratio-based estimator used for the pooled "median" method so the
+        # per-frame numbers are directly comparable to it.
+        frame_estimates.append(estimate_scale_median(depth_pts_cam_valid, colmap_pts_cam))
 
     if len(all_depth_points) < 100:
         logger.warning(f"Insufficient correspondences: {len(all_depth_points)}")
@@ -405,14 +456,68 @@ def estimate_global_scale(
             method=method,
             num_samples=len(all_depth_points),
             inlier_ratio=0.0,
+            frame_estimates=frame_estimates or None,
         )
 
     depth_points = np.array(all_depth_points)
     colmap_points = np.array(all_colmap_points)
 
     if method == "median":
-        return estimate_scale_median(depth_points, colmap_points)
+        pooled_estimate = estimate_scale_median(depth_points, colmap_points)
     elif method == "ransac":
-        return estimate_scale_ransac(depth_points, colmap_points)
+        pooled_estimate = estimate_scale_ransac(depth_points, colmap_points)
     else:
-        return estimate_scale_umeyama(depth_points, colmap_points)
+        pooled_estimate = estimate_scale_umeyama(depth_points, colmap_points)
+
+    # Bug 2 (robust aggregation layer): the pooled fit above is the
+    # "headline" estimate as configured via `scaling.method`. Independently,
+    # aggregate the genuine PER-FRAME scales with median + MAD outlier
+    # rejection -- this is orthogonal to `method` (umeyama/median/ransac
+    # pick how the pooled correspondences are fit; this is a cross-check /
+    # outlier-frame detector over frames, always using the same robust
+    # recipe regardless of `method`). `scaling.robust_statistic` selects the
+    # final aggregator: "median" (default) takes the plain median of the
+    # (MAD-outlier-filtered) per-frame scales; anything else falls back to
+    # the pooled estimate's own scale (MAD rejection is an outlier gate, not
+    # an aggregator, so it stays on either way as a sanity signal).
+    contributing_frame_scales = np.array(
+        [e.scale for e in frame_estimates if e.num_samples > 0]
+    )
+    final_scale = pooled_estimate.scale
+    if len(contributing_frame_scales) >= 3:
+        filtered_scales = remove_outliers_mad(contributing_frame_scales)
+        if len(filtered_scales) == 0:
+            filtered_scales = contributing_frame_scales
+        robust_scale = float(np.median(filtered_scales))
+
+        if robust_statistic == "median":
+            final_scale = robust_scale
+
+        # Sanity cross-check: if the pooled fit and the per-frame robust
+        # median disagree substantially, the pooled fit is likely being
+        # skewed by a subset of frames (e.g. a reconstruction-quality scale
+        # jump, see the NOTE above `frame_cache`'s consumer loop) -- prefer
+        # the more robust per-frame aggregate and log loudly rather than
+        # silently trusting the pooled number.
+        if pooled_estimate.scale > 0 and abs(robust_scale - pooled_estimate.scale) / pooled_estimate.scale > 0.2:
+            logger.warning(
+                f"Pooled scale estimate ({pooled_estimate.scale:.4f}, method={method}) disagrees "
+                f"with the per-frame robust median ({robust_scale:.4f}) by more than 20% -- "
+                "using the per-frame robust median as the final scale. Investigate "
+                "per-frame scale diagnostics before trusting this scene's trajectory."
+            )
+            final_scale = robust_scale
+
+    # `num_samples` stays the total pooled correspondence count (already a
+    # meaningful total: the sum of every contributing frame's matched
+    # correspondences), consistent with the pre-fix behavior of the
+    # umeyama/median/ransac estimators.
+    return ScaleEstimate(
+        scale=float(final_scale),
+        confidence=pooled_estimate.confidence,
+        method=pooled_estimate.method,
+        num_samples=pooled_estimate.num_samples,
+        inlier_ratio=pooled_estimate.inlier_ratio,
+        per_frame_scales=contributing_frame_scales.tolist(),
+        frame_estimates=frame_estimates or None,
+    )

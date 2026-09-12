@@ -119,7 +119,19 @@ def depth_ba_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     _scale_points3d(model, scale_estimate.scale)
 
     max_frames = ba_config_dict.get("max_frames_for_ba", scaling_config.get("max_frames_for_scale", 100))
-    image_names = [entry["image_name"] for entry in scaled_trajectory[:max_frames]]
+    # FIXED 2026-09-12 (Bug 3, max_frames part): this used to be
+    # `scaled_trajectory[:max_frames]` -- only the FIRST `max_frames` poses
+    # of the whole sequence. Depth-BA should see geometry spread across the
+    # whole sequence when it's only given a subsample, not just its start
+    # (same fix/rationale as `estimate_global_scale`'s frame sampling).
+    # When `max_frames >= len(scaled_trajectory)`, this is a no-op: every
+    # frame is used, same as before.
+    if max_frames and max_frames > 0 and len(scaled_trajectory) > max_frames:
+        stride_frames = max(1, len(scaled_trajectory) // max_frames)
+        ba_frames = scaled_trajectory[::stride_frames][:max_frames]
+    else:
+        ba_frames = scaled_trajectory
+    image_names = [entry["image_name"] for entry in ba_frames]
 
     def depth_loader(image_name: str) -> np.ndarray | None:
         frame_id = int(image_name.split(".")[0])
@@ -165,6 +177,43 @@ def depth_ba_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
     except Exception as e:
         logger.warning(f"Could not plot depth-BA trajectory: {e}")
 
+    # FIXED 2026-09-12 (Bug 3): depth-BA's optimized trajectory used to only
+    # ever land in trajectory_depth_ba_tum.txt / colmap/sparse/0_refined --
+    # colmap/sparse/0 was never overwritten and nothing downstream (e.g.
+    # export_bag_pipeline.py's extract_trajectory(workspace), which reads
+    # colmap/sparse/0) or reporting-facing (full_pipeline.py's "Metric
+    # trajectory: trajectory_metric_tum.txt" announcement) was aware the
+    # BA-refined trajectory existed, even when BA converged successfully.
+    # When BA converges, promote its trajectory to be the canonical
+    # trajectory_metric_tum.txt -- but first preserve the pre-BA (scale-only)
+    # trajectory at trajectory_scale_only_tum.txt so it isn't lost (useful
+    # for comparison/regression). trajectory_depth_ba_tum.txt is kept too
+    # (harmless duplicate, preserves existing behavior for anything that
+    # already reads that specific filename). On non-convergence, leave
+    # trajectory_metric_tum.txt exactly as scale_pipeline produced it --
+    # full_pipeline's existing "keep scale-only trajectory" fallback
+    # depends on this file staying untouched in that case.
+    promoted_to_metric_tum = False
+    if result.converged:
+        try:
+            import shutil
+            scale_only_tum_path = ws.layout.outputs / "trajectory_scale_only_tum.txt"
+            if metric_tum_path.exists():
+                shutil.copyfile(metric_tum_path, scale_only_tum_path)
+            export_trajectory_tum(ba_trajectory, metric_tum_path)
+            promoted_to_metric_tum = True
+            logger.info(
+                f"depth-BA converged: promoted BA-refined trajectory to {metric_tum_path} "
+                f"(pre-BA scale-only trajectory preserved at {scale_only_tum_path})"
+            )
+        except Exception as e:
+            logger.warning(f"Could not promote depth-BA trajectory to trajectory_metric_tum.txt: {e}")
+    else:
+        logger.warning(
+            "depth-BA did not converge; keeping the scale-only trajectory as "
+            "trajectory_metric_tum.txt"
+        )
+
     report = {
         "converged": result.converged,
         "iterations": result.iterations,
@@ -174,6 +223,7 @@ def depth_ba_pipeline(workspace: Path, config: dict[str, Any]) -> bool:
         "n_points": len(result.point_ids),
         "initial_scale_estimate": scale_estimate.scale,
         "initial_scale_confidence": scale_estimate.confidence,
+        "promoted_to_metric_tum": promoted_to_metric_tum,
     }
     with open(ws.layout.outputs / "depth_ba_report.json", "w") as f:
         json.dump(report, f, indent=2)

@@ -8,6 +8,11 @@ topics:
   depth: null
   pointcloud: null
   camera_info: null
+  # Depth camera's own camera_info topic (may differ from the color
+  # `camera_info` above). Only needed for depth.registration below; left
+  # unresolved (no fallback guess) when a bag has no depth-namespaced
+  # camera_info topic of its own -- see topic_discovery.select_best_topics.
+  depth_camera_info: null
 
 sync:
   max_rgb_depth_dt_sec: 0.03
@@ -23,6 +28,25 @@ depth:
   min_depth_m: 0.2
   max_depth_m: 8.0
   sample_stride: 8
+  # Depth-to-color pixel registration: OFF by default. Some RGB-D drivers
+  # publish a "raw" depth stream that is NOT actually pixel-aligned with
+  # color despite camera_info metadata suggesting otherwise (verified on
+  # kitchen1 -- see configs/orbbec_kitchen1_registered.yaml and
+  # ingest/depth_registration.py's module docstring for the evidence).
+  # Enabling this warps every depth frame into the color camera's pixel
+  # grid at extraction time using the /tf_static depth->color extrinsic,
+  # which changes per-pixel depth values throughout the whole downstream
+  # pipeline -- only turn on for a scene independently verified to need
+  # it. Leave disabled for scenes already using a hardware-aligned depth
+  # stream (e.g. tableware1's /camera/aligned_depth_to_color/...).
+  registration:
+    enabled: false
+    # Physically-real TF frame ids used to look up the depth->color static
+    # extrinsic in /tf_static -- NOT necessarily the frame_id string the
+    # depth camera_info topic itself claims (that field can be
+    # driver-mislabeled; see ingest/depth_registration.py).
+    depth_frame_id: camera_depth_optical_frame
+    color_frame_id: camera_color_optical_frame
 
 colmap:
   camera_model: OPENCV

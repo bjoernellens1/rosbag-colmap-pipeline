@@ -193,4 +193,27 @@ def select_best_topics(reader: BagReader, config: dict[str, Any]) -> dict[str, s
             if "camera_info" not in result and info_topics:
                 result["camera_info"] = info_topics[0].name
 
+    if topics_config.get("depth_camera_info"):
+        result["depth_camera_info"] = topics_config["depth_camera_info"]
+    else:
+        depth_info_topics = discover_camera_info_topics(reader)
+        depth_ns = ""
+        if "depth" in result:
+            parts = result["depth"].split("/")
+            strip_suffixes = {"image_raw", "compressed", "compresseddepth", "raw", "image"}
+            while len(parts) > 1 and parts[-1].lower() in strip_suffixes:
+                parts = parts[:-1]
+            depth_ns = "/".join(parts)
+
+        if depth_ns:
+            for t in depth_info_topics:
+                if t.name.startswith(depth_ns):
+                    result["depth_camera_info"] = t.name
+                    break
+        # Deliberately no fallback-to-first-topic here (unlike the `camera_info`
+        # branch above): guessing a wrong depth camera_info topic would feed
+        # bogus intrinsics into depth registration, which is worse than not
+        # attempting registration at all. Leave unset if the depth namespace
+        # doesn't have its own camera_info topic.
+
     return result

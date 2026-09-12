@@ -28,6 +28,13 @@ topics:
   depth: /camera/depth/image_raw/compressed
   pointcloud: null
   camera_info: /camera/color/camera_info
+  # Depth camera's own camera_info -- only consumed if depth.registration
+  # is enabled (see below; disabled here). On the raw-depth scenes this
+  # profile targets, this topic's frame_id claims "camera_color_optical_
+  # frame" and its K is numerically identical to color's -- almost
+  # certainly a driver metadata quirk, not a real registration. See
+  # configs/orbbec_kitchen1_registered.yaml.
+  depth_camera_info: /camera/depth/camera_info
 
 sync:
   max_rgb_depth_dt_sec: 0.03
@@ -43,6 +50,16 @@ depth:
   min_depth_m: 0.2
   max_depth_m: 8.0
   sample_stride: 8
+  # OFF here deliberately: this is a generic profile shared by scenes with
+  # different depth-stream situations (some raw/unregistered, tableware1
+  # hardware-aligned). Only kitchen1 has been independently verified (via
+  # an edge-alignment QC check) to need registration -- see
+  # configs/orbbec_kitchen1_registered.yaml, which extends this profile
+  # with registration enabled. See configs/default.yaml for what this does.
+  registration:
+    enabled: false
+    depth_frame_id: camera_depth_optical_frame
+    color_frame_id: camera_color_optical_frame
 
 colmap:
   camera_model: OPENCV
